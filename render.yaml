@@ -1,0 +1,31 @@
+databases:
+  - name: hinthar-sms-db
+    plan: free
+    databaseName: hinthar_sms
+    user: hinthar
+
+services:
+  - type: web
+    name: hinthar-sms-api
+    runtime: python
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hinthar-sms-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: ".onrender.com"
+      - key: PYTHON_VERSION
+        value: "3.12.2"
+      - key: CLERK_FRONTEND_API
+        sync: false
+      - key: CLERK_JWKS_URL
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false

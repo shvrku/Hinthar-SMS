@@ -48,7 +48,7 @@ A modern, API-first school management system built with Django and Django REST F
 | **Database** | PostgreSQL (Neon) | Managed, portable, supports Row-Level Security |
 | **Auth** | Clerk (OIDC) | Handles login, MFA, and sessions outside app code |
 | **API Docs** | drf-spectacular (OpenAPI 3) | Auto-generated, interactive API documentation |
-| **Deployment** | Docker | Long-running process support for Django |
+| **Production** | Render (native Python) | Auto-deploy from Git, managed infrastructure |
 | **Frontend** | Decoupled (any framework) | Consumes the REST API — build or rebuild the UI independently |
 
 ---
@@ -56,11 +56,10 @@ A modern, API-first school management system built with Django and Django REST F
 ## 🚀 Getting Started
 
 ### Prerequisites
-- Python 3.11+
-- PostgreSQL (or a [Neon](https://neon.tech) account)
+- Python 3.12+
 - A [Clerk](https://clerk.com) account for authentication
 
-### Setup
+### Local Development
 
 ```bash
 # Clone the repository
@@ -76,7 +75,7 @@ pip install -r requirements.txt
 
 # Configure environment variables
 cp .env.example .env
-# Edit .env with your database URL, Clerk keys, etc.
+# Edit .env with your DATABASE_URL, Clerk keys, etc.
 
 # Run migrations
 python manage.py migrate
@@ -84,6 +83,10 @@ python manage.py migrate
 # Start the development server
 python manage.py runserver
 ```
+
+### Deployment (Render)
+
+The production backend is deployed on [Render](https://render.com) as a native Python service with auto-deploy from the main branch. A `render.yaml` Blueprint is included — just connect your repo on Render and it handles the rest. The production database is Render's managed PostgreSQL (or Neon).
 
 ---
 

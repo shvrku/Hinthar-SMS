@@ -145,7 +145,7 @@ ADJUSTMENTS   -- corrections, never edit locked payslips/sessions directly
 | Auth | Clerk (OIDC-based) | Handles login, MFA, session management outside app code |
 | Frontend | Any framework, consumes the API only | Decoupled — teammates build/rebuild UI without touching backend, no merge-conflict risk |
 | Frontend hosting | Vercel | Good fit for the frontend specifically |
-| Backend hosting | Docker container on self-managed host | Django needs a long-running process — not a fit for Vercel serverless (timeouts, no background workers) |
+| Backend hosting | Render (native Python) | Auto-deploy from Git; `render.yaml` Blueprint included for one-click setup |
  
 ---
  
