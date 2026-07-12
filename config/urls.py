@@ -22,9 +22,8 @@ urlpatterns = [
         
         # App-specific endpoints
         path('', include('people.urls')),
-        # Future app endpoints will be routed here
-        # path('', include('timetable.urls')),
-        # path('', include('sessions.urls')),
-        # path('', include('payroll.urls')),
+        path('', include('timetable.urls')),
+        path('', include('class_sessions.urls')),
+        path('', include('payroll.urls')),
     ])),
 ]
