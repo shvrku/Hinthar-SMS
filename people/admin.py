@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from people.models import User, Subject, Teacher, Student, Staff
+from people.models import User, Subject, Teacher, Student, Staff, AuditLog
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
@@ -42,3 +42,21 @@ class StaffAdmin(admin.ModelAdmin):
     list_display = ('id', 'name', 'user')
     search_fields = ('name', 'contact')
     raw_id_fields = ('user',)
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ('timestamp', 'model_name', 'record_id', 'action', 'field_name', 'user')
+    list_filter = ('action', 'model_name', 'timestamp')
+    search_fields = ('record_id', 'model_name', 'field_name')
+    date_hierarchy = 'timestamp'
+    readonly_fields = ('user', 'model_name', 'record_id', 'action', 'field_name', 'old_value', 'new_value', 'timestamp')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

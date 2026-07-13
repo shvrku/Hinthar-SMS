@@ -79,3 +79,30 @@ class Staff(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class AuditLog(models.Model):
+    ACTION_CHOICES = [
+        ('create', 'Create'),
+        ('update', 'Update'),
+        ('delete', 'Delete'),
+    ]
+
+    user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='audit_logs'
+    )
+    model_name = models.CharField(max_length=255, db_index=True)
+    record_id = models.CharField(max_length=255, db_index=True)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    field_name = models.CharField(max_length=255, null=True, blank=True)
+    old_value = models.TextField(null=True, blank=True)
+    new_value = models.TextField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+        verbose_name = 'Audit Log'
+        verbose_name_plural = 'Audit Logs'
+
+    def __str__(self):
+        return f"{self.get_action_display()} {self.model_name}#{self.record_id} by {self.user or 'unknown'} at {self.timestamp}"

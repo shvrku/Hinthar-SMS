@@ -22,7 +22,12 @@ class Class(models.Model):
     cohort_sub_category = models.CharField(max_length=1, null=True, blank=True)  # stream split like 1, 2, 3
     
     class Meta:
-        unique_together = ('education_level', 'cohort_identifier', 'cohort_sub_category')
+        constraints = [
+            models.UniqueConstraint(
+                fields=['education_level', 'cohort_identifier', 'cohort_sub_category'],
+                name='unique_class_per_level_cohort'
+            ),
+        ]
         verbose_name_plural = 'Classes'
         
     def __str__(self):
@@ -36,8 +41,13 @@ class ClassStudent(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='enrolled_classes')
     
     class Meta:
-        unique_together = ('class_obj', 'student')
-        
+        constraints = [
+            models.UniqueConstraint(
+                fields=['class_obj', 'student'],
+                name='unique_student_per_class'
+            ),
+        ]
+
     def __str__(self):
         return f"{self.student.name} in {self.class_obj}"
 
@@ -70,8 +80,13 @@ class TimetableStudent(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='timetable_slots')
     
     class Meta:
-        unique_together = ('timetable_slot', 'student')
-        
+        constraints = [
+            models.UniqueConstraint(
+                fields=['timetable_slot', 'student'],
+                name='unique_student_per_timetable_slot'
+            ),
+        ]
+
     def __str__(self):
         return f"{self.student.name} in {self.timetable_slot}"
 

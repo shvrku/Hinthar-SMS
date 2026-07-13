@@ -43,6 +43,7 @@ class SessionViewSet(ModelViewSet):
         new_status = request.data.get('status')
         if new_status:
             session.status = new_status
+            session._audit_user = request.user
             session.save()
             serializer = self.get_serializer(session)
             return Response(serializer.data)

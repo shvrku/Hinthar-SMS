@@ -124,7 +124,7 @@ class ConfirmPayslipView(APIView):
         
         net_pay = gross_pay - tax_deduction - other_deductions + adjustments_total
         
-        payslip = Payslip.objects.create(
+        payslip = Payslip(
             teacher=teacher,
             pay_period=pay_period,
             session_count=session_count,
@@ -136,6 +136,8 @@ class ConfirmPayslipView(APIView):
             net_pay=net_pay,
             status='approved'
         )
+        payslip._audit_user = request.user
+        payslip.save()
         
         # Mark sessions as paid and link to payslip
         sessions.update(paid=True, payslip=payslip)
