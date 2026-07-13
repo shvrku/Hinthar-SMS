@@ -10,5 +10,5 @@ router.register(r'staff', StaffViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('me', MeView.as_view(), name='me'),
+    path('me/', MeView.as_view(), name='me'),
 ]

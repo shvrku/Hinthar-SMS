@@ -31,3 +31,6 @@ Thumbs.db
 # Logs
 *.log
 
+#Front End 
+/admin-frontend
+

@@ -1,9 +1,7 @@
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
-from django.utils import timezone
 
 from people.models import AuditLog
-from people.models import User as UserModel
 
 
 def _log_action(user, model_name, record_id, action, field_name=None, old_value=None, new_value=None):

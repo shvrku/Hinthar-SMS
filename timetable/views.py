@@ -4,12 +4,11 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.db.models import Q
-from django.utils import timezone
 from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
 from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer, TimetableStudentSerializer
 )
-from people.permissions import IsAdmin, IsOwnerTeacher
+from people.permissions import IsAdmin
 
 class ClassViewSet(ModelViewSet):
     queryset = Class.objects.all()

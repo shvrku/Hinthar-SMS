@@ -5,7 +5,6 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.utils import timezone
-from django.db.models import Sum
 from datetime import timedelta
 from class_sessions.models import Session, SessionAttendance
 from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer
@@ -68,7 +67,7 @@ class GenerateSessionsView(APIView):
         start_date = request.data.get('start_date', timezone.localdate())
         end_date = request.data.get('end_date', start_date + timedelta(days=14))
         
-        slots = TimetableSlot.objects.all()
+        slots = TimetableSlot.objects.select_related('teacher', 'class_obj').all()
         created_count = 0
         
         for slot in slots:
