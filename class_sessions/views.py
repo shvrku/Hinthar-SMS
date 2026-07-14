@@ -7,7 +7,7 @@ from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from class_sessions.models import Session, SessionAttendance
-from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer
+from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer, SessionAttendanceListSerializer
 from people.permissions import IsAdmin, IsOwnerTeacher
 from timetable.models import TimetableSlot, ClassStudent, TimetableStudent
 
@@ -49,7 +49,10 @@ class SessionViewSet(ModelViewSet):
         return Response({'error': 'status is required'}, status=400)
 
 class SessionAttendanceViewSet(ModelViewSet):
-    queryset = SessionAttendance.objects.all()
+    queryset = SessionAttendance.objects.select_related(
+        'session', 'session__teacher', 'session__class_obj', 'session__timetable_slot',
+        'student'
+    ).all()
     serializer_class = SessionAttendanceSerializer
     permission_classes = [IsAuthenticated]
     
@@ -57,6 +60,11 @@ class SessionAttendanceViewSet(ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [(IsAdmin | IsOwnerTeacher)()]
         return [IsAuthenticated()]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return SessionAttendanceListSerializer
+        return SessionAttendanceSerializer
 
 class GenerateSessionsView(APIView):
     permission_classes = [IsAdmin]

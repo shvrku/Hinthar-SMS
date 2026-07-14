@@ -24,7 +24,9 @@ class PayPeriodViewSet(ModelViewSet):
         return [IsAuthenticated()]
 
 class PayslipViewSet(ModelViewSet):
-    queryset = Payslip.objects.all()
+    queryset = Payslip.objects.select_related(
+        'teacher', 'teacher__user', 'pay_period'
+    ).all()
     serializer_class = PayslipSerializer
     permission_classes = [IsAuthenticated]
     

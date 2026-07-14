@@ -1,13 +1,16 @@
+from django.contrib.auth import get_user_model
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.viewsets import ModelViewSet
+from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema
 from people.serializers import (
-    UserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer
+    UserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
-from people.models import Subject, Teacher, Student, Staff
+from people.models import Subject, Teacher, Student, Staff, AuditLog
 from people.permissions import IsAdmin
+
+User = get_user_model()
 
 class MeView(APIView):
     """
@@ -64,3 +67,22 @@ class StaffViewSet(ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdmin()]
         return [IsAuthenticated()]
+
+
+class UserViewSet(ModelViewSet):
+    queryset = User.objects.select_related(
+        'teacher_profile', 'student_profile', 'staff_profile'
+    ).all()
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdmin()]
+        return [IsAuthenticated()]
+
+
+class AuditLogViewSet(ReadOnlyModelViewSet):
+    queryset = AuditLog.objects.select_related('user').all()
+    serializer_class = AuditLogSerializer
+    permission_classes = [IsAdmin]

@@ -1,6 +1,6 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from people.models import Subject, Teacher, Student, Staff
+from people.models import Subject, Teacher, Student, Staff, AuditLog
 
 User = get_user_model()
 
@@ -49,3 +49,15 @@ class StaffSerializer(serializers.ModelSerializer):
     class Meta:
         model = Staff
         fields = ['id', 'name', 'contact', 'user_id']
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    user_email = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = AuditLog
+        fields = ['id', 'user', 'user_email', 'model_name', 'record_id', 'action', 'field_name', 'old_value', 'new_value', 'timestamp']
+        read_only_fields = fields
+
+    def get_user_email(self, obj):
+        return obj.user.email if obj.user else None
