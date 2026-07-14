@@ -7,69 +7,60 @@ from rest_framework import authentication, exceptions
 
 User = get_user_model()
 
+DEFAULT_ROLE = 'student'
+
 class ClerkJWTAuthentication(authentication.BaseAuthentication):
     """
     Custom DRF authentication class for Clerk JWT verification.
-    """
     
+    Clerk handles identity (who you are). Roles are managed locally
+    in the Django User model via the admin panel — NOT synced from Clerk.
+    """
+
     def authenticate(self, request):
         auth_header = request.headers.get('Authorization')
         if not auth_header:
             return None
-            
+
         parts = auth_header.split()
         if len(parts) != 2 or parts[0].lower() != 'bearer':
             return None
-            
+
         token = parts[1]
-        
+
         # Local test bypass / mock authentication for development
         if settings.DEBUG and token.startswith("mock_token_"):
             return self._authenticate_mock(token)
-            
+
         return self._authenticate_clerk(token)
 
     def _authenticate_mock(self, token):
         """
         Helper for local testing without real Clerk endpoints.
-        E.g., mock_token_admin, mock_token_teacher_1, mock_token_student_1
+        All mock users get the DEFAULT_ROLE — change via admin if needed.
         """
-        role = 'student'
-        if 'admin' in token:
-            role = 'admin'
-        elif 'teacher' in token:
-            role = 'teacher'
-            
         clerk_id = f"clerk_{token}"
         username = f"user_{token}"
         email = f"{username}@example.com"
-        
-        # JIT provision/retrieve mock user
-        user, created = User.objects.get_or_create(
+
+        user, _ = User.objects.get_or_create(
             clerk_id=clerk_id,
             defaults={
                 'username': username,
                 'email': email,
-                'role': role,
-                'is_staff': role == 'admin',
-                'is_superuser': role == 'admin',
+                'role': DEFAULT_ROLE,
+                'is_staff': False,
+                'is_superuser': False,
             }
         )
-        
-        # Update role if it changed
-        if user.role != role:
-            user.role = role
-            user.is_staff = role == 'admin'
-            user.is_superuser = role == 'admin'
-            user.save(update_fields=['role', 'is_staff', 'is_superuser'])
-            
+
         return (user, token)
 
     def _authenticate_clerk(self, token):
         jwks_url = getattr(settings, 'CLERK_JWKS_URL', '')
         if not jwks_url:
             raise exceptions.AuthenticationFailed("Clerk JWKS URL is not configured.")
-            
+
         try:
             # 1. Fetch public keys from Clerk's JWKS endpoint (cache for 1 hour)
             jwks = cache.get('clerk_jwks')
@@ -78,32 +69,31 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
                 response.raise_for_status()
                 jwks = response.json()
                 cache.set('clerk_jwks', jwks, timeout=3600)
-                
+
             # 2. Get the kid from the JWT header
             unverified_header = jwt.get_unverified_header(token)
             kid = unverified_header.get('kid')
             if not kid:
                 raise exceptions.AuthenticationFailed("Token does not contain 'kid' in header.")
-                
+
             # 3. Find the matching public key
             public_key = None
             for key in jwks.get('keys', []):
                 if key.get('kid') == kid:
                     public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key)
                     break
-                    
+
             if not public_key:
                 raise exceptions.AuthenticationFailed("Matching public key not found in JWKS.")
-                
+
             # 4. Decode and verify the JWT
-            # Clerk token audience is usually the frontend URL or empty
             payload = jwt.decode(
                 token,
                 public_key,
                 algorithms=['RS256'],
                 options={"verify_aud": False}
             )
-            
+
         except jwt.ExpiredSignatureError:
             raise exceptions.AuthenticationFailed("Token has expired.")
         except jwt.InvalidSignatureError:
@@ -114,44 +104,31 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed("Failed to fetch JWKS keys from Clerk.")
         except Exception as e:
             raise exceptions.AuthenticationFailed(f"Token verification failed: {str(e)}")
-            
-        # 5. Extract user claims
+
+        # 5. Extract identity claims (NOT role — roles are managed in Django admin)
         clerk_id = payload.get('sub')
         if not clerk_id:
             raise exceptions.AuthenticationFailed("Token does not contain 'sub' claim.")
-            
-        # Extract metadata and determine role
-        # Standard custom claim for metadata or role structure from Clerk JWT template
-        role = payload.get('role') or payload.get('public_metadata', {}).get('role', 'student')
+
         email = payload.get('email') or payload.get('primary_email_address') or ""
-        
-        # Determine username (use clerk_id as fallback)
         username = payload.get('username') or email.split('@')[0] if email else clerk_id
-        
-        # 6. JIT provision the User
+
+        # 6. JIT provision the User with DEFAULT_ROLE
+        #    Role is NEVER overwritten from Clerk — admins manage it via Django admin.
         user, created = User.objects.get_or_create(
             clerk_id=clerk_id,
             defaults={
                 'username': username,
                 'email': email,
-                'role': role,
-                'is_staff': role == 'admin',
-                'is_superuser': role == 'admin',
+                'role': DEFAULT_ROLE,
+                'is_staff': False,
+                'is_superuser': False,
             }
         )
-        
-        # If user exists, verify / update role if it changed in Clerk
-        if not created:
-            updated_fields = []
-            if user.role != role:
-                user.role = role
-                user.is_staff = role == 'admin'
-                user.is_superuser = role == 'admin'
-                updated_fields.extend(['role', 'is_staff', 'is_superuser'])
-            if email and user.email != email:
-                user.email = email
-                updated_fields.append('email')
-            if updated_fields:
-                user.save(update_fields=updated_fields)
-                
+
+        # 7. Sync email only (not role) if it changed
+        if not created and email and user.email != email:
+            user.email = email
+            user.save(update_fields=['email'])
+
         return (user, token)

@@ -5,14 +5,15 @@ from people.models import User, Subject, Teacher, Student, Staff, AuditLog
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     fieldsets = BaseUserAdmin.fieldsets + (
-        ('Clerk Identity', {'fields': ('clerk_id', 'role')}),
+        ('Authorization', {'fields': ('role', 'clerk_id')}),
     )
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
-        ('Clerk Identity', {'fields': ('clerk_id', 'role')}),
+        ('Authorization', {'fields': ('role', 'clerk_id')}),
     )
-    list_display = ('username', 'email', 'role', 'clerk_id', 'is_staff')
+    list_display = ('username', 'email', 'role', 'is_staff', 'clerk_id')
     list_filter = ('role', 'is_staff', 'is_superuser', 'is_active')
     search_fields = ('username', 'email', 'clerk_id')
+    list_editable = ('role',)
 
 
 @admin.register(Subject)
