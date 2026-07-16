@@ -1,5 +1,33 @@
 from rest_framework import permissions
 
+
+class IsAuthenticatedNonTerminal(permissions.BasePermission):
+    """
+    Default DRF permission: authenticated but NOT a terminal account.
+    Terminals are locked out of all views by default — they can only
+    access endpoints that explicitly grant CanCheckIn permission.
+    """
+    def has_permission(self, request, view):
+        return (
+            request.user and
+            request.user.is_authenticated and
+            request.user.role != 'terminal'
+        )
+
+
+class CanCheckIn(permissions.BasePermission):
+    """
+    Allows access to terminal accounts for check-in operations,
+    plus staff, admin, and teachers who may process manual check-ins.
+    """
+    def has_permission(self, request, view):
+        return (
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('terminal', 'admin', 'staff', 'teacher')
+        )
+
+
 class IsAdmin(permissions.BasePermission):
     """
     Allows access only to Admin users.
@@ -80,3 +108,31 @@ class IsOwnerStaff(permissions.BasePermission):
             
         staff_attr = getattr(obj, 'staff', None)
         return staff_attr == request.user.staff_profile
+
+
+class IsStaffOrAdmin(permissions.BasePermission):
+    """Allows access only to Staff or Admin users."""
+    def has_permission(self, request, view):
+        return (
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('admin', 'staff')
+        )
+
+
+class IsStudentOwnerOrStaffOrAdmin(permissions.BasePermission):
+    """
+    Allows access if the user is:
+    - the student themselves (the Student's linked User == request.user), or
+    - Staff, or
+    - Admin.
+    """
+    def has_permission(self, request, view):
+        return request.user and request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.role in ('admin', 'staff'):
+            return True
+        if request.user.role == 'student' and obj.user == request.user:
+            return True
+        return False

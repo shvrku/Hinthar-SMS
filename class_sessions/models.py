@@ -1,5 +1,6 @@
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from people.models import Teacher, Student
 from timetable.models import TimetableSlot, Class
 
@@ -65,3 +66,40 @@ class SessionAttendance(models.Model):
         
     def __str__(self):
         return f"{self.student.name} - {self.get_status_display()}"
+
+
+class CheckIn(models.Model):
+    CHECK_IN_TYPES = [
+        ('qr', 'QR Code'),
+        ('manual', 'Manual'),
+    ]
+
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='check_ins')
+    date = models.DateField(db_index=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    check_in_type = models.CharField(max_length=10, choices=CHECK_IN_TYPES, default='qr')
+    checked_by = models.ForeignKey(
+        'people.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='check_ins_performed'
+    )
+
+    def save(self, *args, **kwargs):
+        if not self.date:
+            self.date = timezone.localdate()
+        super().save(*args, **kwargs)
+
+    class Meta:
+        verbose_name = 'Check In'
+        verbose_name_plural = 'Check Ins'
+        db_table = 'check_ins'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'date'],
+                name='unique_student_daily_checkin'
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['student', 'timestamp']),
+        ]
+
+    def __str__(self):
+        return f"{self.student.name} checked in via {self.check_in_type} at {self.timestamp:%d/%m/%y %H:%M:%S}"

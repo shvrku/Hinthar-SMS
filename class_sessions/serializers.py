@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from class_sessions.models import Session, SessionAttendance
+from class_sessions.models import Session, SessionAttendance, CheckIn
 from timetable.serializers import TimetableSlotSerializer, ClassSerializer
 from people.serializers import TeacherSerializer, StudentSerializer
 
@@ -53,3 +53,12 @@ class SessionAttendanceListSerializer(serializers.ModelSerializer):
 
     def get_class_name(self, obj):
         return obj.session.class_obj.name if (obj.session and obj.session.class_obj) else None
+
+
+class CheckInSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.name', read_only=True)
+
+    class Meta:
+        model = CheckIn
+        fields = ['id', 'student', 'student_name', 'date', 'timestamp', 'check_in_type', 'checked_by']
+        read_only_fields = ['date', 'timestamp', 'checked_by']

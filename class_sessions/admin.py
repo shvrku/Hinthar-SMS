@@ -1,5 +1,5 @@
 from django.contrib import admin
-from class_sessions.models import Session, SessionAttendance
+from class_sessions.models import Session, SessionAttendance, CheckIn
 
 
 @admin.register(Session)
@@ -15,3 +15,11 @@ class SessionAttendanceAdmin(admin.ModelAdmin):
     list_display = ('id', 'session', 'student', 'status')
     list_filter = ('status', 'session')
     search_fields = ('student__name',)
+
+
+@admin.register(CheckIn)
+class CheckInAdmin(admin.ModelAdmin):
+    list_display = ('id', 'student', 'timestamp', 'check_in_type', 'checked_by')
+    list_filter = ('check_in_type', 'timestamp')
+    search_fields = ('student__name',)
+    date_hierarchy = 'timestamp'

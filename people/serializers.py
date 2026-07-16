@@ -41,7 +41,8 @@ class StudentSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Student
-        fields = ['id', 'name', 'dob', 'enrollment_date', 'contact', 'user_id']
+        fields = ['id', 'name', 'dob', 'enrollment_date', 'contact', 'user_id', 'check_in_token']
+        read_only_fields = ['check_in_token']
 
 class StaffSerializer(serializers.ModelSerializer):
     user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')

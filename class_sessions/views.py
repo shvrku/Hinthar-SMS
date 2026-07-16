@@ -3,13 +3,15 @@ from datetime import datetime, timedelta
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.utils import timezone
-from class_sessions.models import Session, SessionAttendance
-from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer, SessionAttendanceListSerializer
-from people.permissions import IsAdmin, IsOwnerTeacher
+from class_sessions.models import Session, SessionAttendance, CheckIn
+from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer, SessionAttendanceListSerializer, CheckInSerializer
+from people.permissions import IsAdmin, IsOwnerTeacher, IsStaffOrAdmin, CanCheckIn
+from people.models import Student
 from timetable.models import TimetableSlot, ClassStudent, TimetableStudent
 
 class SessionViewSet(ModelViewSet):
@@ -118,3 +120,73 @@ class GenerateSessionsView(APIView):
                 current_date += timedelta(days=1)
         
         return Response({'created_sessions': created_count})
+
+
+class CheckInViewSet(ModelViewSet):
+    queryset = CheckIn.objects.select_related('student', 'checked_by').all()
+    serializer_class = CheckInSerializer
+    permission_classes = [IsStaffOrAdmin]
+
+    def perform_create(self, serializer):
+        serializer.save(checked_by=self.request.user)
+
+
+class QRCheckInView(APIView):
+    permission_classes = [CanCheckIn]
+    throttle_scope = 'checkin'
+
+    def post(self, request):
+        token = request.data.get('check_in_token')
+        if not token:
+            return Response({'error': 'check_in_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            try:
+                student = Student.objects.select_for_update().get(check_in_token=token)
+            except Student.DoesNotExist:
+                return Response({'error': 'Invalid check-in token'}, status=status.HTTP_400_BAD_REQUEST)
+
+            today = timezone.localdate()
+            if CheckIn.objects.select_for_update().filter(student=student, date=today).exists():
+                return Response({'error': 'Student already checked in today'}, status=status.HTTP_409_CONFLICT)
+
+            checkin = CheckIn.objects.create(
+                student=student,
+                check_in_type='qr',
+                checked_by=request.user,
+            )
+
+        serializer = CheckInSerializer(checkin)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class ManualCheckInView(APIView):
+    permission_classes = [CanCheckIn]
+    throttle_scope = 'checkin'
+
+    def post(self, request):
+        student_id = request.data.get('student_id')
+        if not student_id:
+            return Response({'error': 'student_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not str(student_id).isdigit():
+            return Response({'error': 'student_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            try:
+                student = Student.objects.select_for_update().get(id=student_id)
+            except Student.DoesNotExist:
+                return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            today = timezone.localdate()
+            if CheckIn.objects.select_for_update().filter(student=student, date=today).exists():
+                return Response({'error': 'Student already checked in today'}, status=status.HTTP_409_CONFLICT)
+
+            checkin = CheckIn.objects.create(
+                student=student,
+                check_in_type='manual',
+                checked_by=request.user,
+            )
+
+        serializer = CheckInSerializer(checkin)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
