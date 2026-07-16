@@ -1,3 +1,5 @@
+import secrets
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
@@ -7,6 +9,7 @@ class User(AbstractUser):
         ('staff', 'Staff'),
         ('teacher', 'Teacher'),
         ('student', 'Student'),
+        ('terminal', 'Terminal'),
     ]
     
     clerk_id = models.CharField(max_length=255, unique=True, db_index=True)
@@ -52,6 +55,7 @@ class Student(models.Model):
     dob = models.DateField(null=True, blank=True)
     enrollment_date = models.DateField(auto_now_add=True)
     contact = models.TextField(blank=True, null=True)
+    check_in_token = models.CharField(max_length=64, unique=True, blank=True, editable=False)
     # Link to user account (optional, student can exist without login)
     user = models.OneToOneField(
         User,
@@ -60,6 +64,15 @@ class Student(models.Model):
         blank=True,
         related_name='student_profile'
     )
+
+    def save(self, *args, **kwargs):
+        if not self.check_in_token:
+            self.check_in_token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+
+    def regenerate_check_in_token(self):
+        self.check_in_token = secrets.token_urlsafe(32)
+        self.save(update_fields=['check_in_token'])
 
     def __str__(self):
         return self.name
