@@ -65,7 +65,7 @@ class PayslipPreviewView(APIView):
             
         sessions = Session.objects.filter(
             teacher=teacher,
-            session_date__range=(pay_period.start_date, pay_period.end_date),
+            start_time__date__range=(pay_period.start_date, pay_period.end_date),
             status='completed',
             paid=False
         )
@@ -118,7 +118,7 @@ class ConfirmPayslipView(APIView):
         # Select for update to prevent concurrent confirms
         sessions = Session.objects.select_for_update().filter(
             teacher=teacher,
-            session_date__range=(pay_period.start_date, pay_period.end_date),
+            start_time__date__range=(pay_period.start_date, pay_period.end_date),
             status='completed',
             paid=False
         )

@@ -5,6 +5,7 @@ from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStuden
 from class_sessions.models import Session, SessionAttendance
 from payroll.models import PayPeriod, Payslip, Adjustment
 from datetime import date, timedelta, time
+from decimal import Decimal
 
 
 class Command(BaseCommand):
@@ -153,14 +154,18 @@ class Command(BaseCommand):
                 self.stdout.write(f'Added {student.name} to tutor slot: {tutor_slot}')
 
         # --- Sessions & Attendance Module ---
+        from datetime import datetime as dt
         today = date.today()
         for i in range(10):
             session_date = today - timedelta(days=i)
             for slot in timetable_slots:
+                start_time = timezone.make_aware(dt.combine(session_date, slot.start_time))
+                end_time = timezone.make_aware(dt.combine(session_date, slot.end_time))
                 session, created = Session.objects.get_or_create(
                     timetable_slot=slot,
-                    session_date=session_date,
+                    start_time=start_time,
                     defaults={
+                        'end_time': end_time,
                         'teacher': slot.teacher,
                         'class_obj': slot.class_obj,
                         'status': 'completed' if i > 2 else 'scheduled',
@@ -177,7 +182,7 @@ class Command(BaseCommand):
                             SessionAttendance.objects.get_or_create(
                                 session=session,
                                 student=cs.student,
-                                defaults={'status': 'present'}
+                                defaults={'status': 'absent'}
                             )
                     # Attendance for tutor sessions
                     elif session.timetable_slot:
@@ -186,7 +191,7 @@ class Command(BaseCommand):
                             SessionAttendance.objects.get_or_create(
                                 session=session,
                                 student=ts.student,
-                                defaults={'status': 'present'}
+                                defaults={'status': 'absent'}
                             )
 
         # --- Payroll Module ---
@@ -203,13 +208,14 @@ class Command(BaseCommand):
             # Count sessions in the period
             session_count = Session.objects.filter(
                 teacher=teacher,
-                session_date__range=(pay_period.start_date, pay_period.end_date),
+                start_time__date__range=(pay_period.start_date, pay_period.end_date),
                 status='completed',
                 paid=False
             ).count()
             if session_count > 0:
+                from decimal import Decimal
                 gross_pay = session_count * teacher.default_rate
-                tax = gross_pay * 0.15
+                tax = gross_pay * Decimal('0.15')
                 net = gross_pay - tax
                 payslip, created = Payslip.objects.get_or_create(
                     teacher=teacher,
@@ -229,7 +235,7 @@ class Command(BaseCommand):
                     # Mark sessions as paid and link to payslip
                     Session.objects.filter(
                         teacher=teacher,
-                        session_date__range=(pay_period.start_date, pay_period.end_date),
+                        start_time__date__range=(pay_period.start_date, pay_period.end_date),
                         status='completed',
                         paid=False
                     ).update(paid=True, payslip=payslip)

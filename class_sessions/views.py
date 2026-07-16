@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -5,7 +7,6 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.utils import timezone
-from datetime import timedelta
 from class_sessions.models import Session, SessionAttendance
 from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer, SessionAttendanceListSerializer
 from people.permissions import IsAdmin, IsOwnerTeacher
@@ -25,9 +26,9 @@ class SessionViewSet(ModelViewSet):
         if teacher_id:
             qs = qs.filter(teacher_id=teacher_id)
         if date_from:
-            qs = qs.filter(session_date__gte=date_from)
+            qs = qs.filter(start_time__date__gte=date_from)
         if date_to:
-            qs = qs.filter(session_date__lte=date_to)
+            qs = qs.filter(start_time__date__lte=date_to)
         
         return qs
     
@@ -71,7 +72,6 @@ class GenerateSessionsView(APIView):
     
     @transaction.atomic
     def post(self, request):
-        # Generate sessions for the next 2 weeks (or custom date range)
         start_date = request.data.get('start_date', timezone.localdate())
         end_date = request.data.get('end_date', start_date + timedelta(days=14))
         
@@ -79,15 +79,17 @@ class GenerateSessionsView(APIView):
         created_count = 0
         
         for slot in slots:
-            # For each timetable slot, find all days in [start_date, end_date] that match day_of_week
             current_date = start_date
             while current_date <= end_date:
                 if current_date.weekday() == slot.day_of_week:
-                    # Get or create session for this slot + date
+                    start_time = timezone.make_aware(datetime.combine(current_date, slot.start_time))
+                    end_time = timezone.make_aware(datetime.combine(current_date, slot.end_time))
+                    
                     session, created = Session.objects.get_or_create(
                         timetable_slot=slot,
-                        session_date=current_date,
+                        start_time=start_time,
                         defaults={
+                            'end_time': end_time,
                             'teacher': slot.teacher,
                             'class_obj': slot.class_obj,
                             'status': 'scheduled',
@@ -96,24 +98,22 @@ class GenerateSessionsView(APIView):
                     )
                     if created:
                         created_count += 1
-                        # Populate attendance roster
+                        # Populate attendance roster (default: absent until checked in)
                         if slot.class_obj:
-                            # Get all students in the class
                             class_students = ClassStudent.objects.filter(class_obj=slot.class_obj)
                             for cs in class_students:
                                 SessionAttendance.objects.get_or_create(
                                     session=session,
                                     student=cs.student,
-                                    defaults={'status': 'present'}
+                                    defaults={'status': 'absent'}
                                 )
                         else:
-                            # Get all students in timetable students
                             timetable_students = TimetableStudent.objects.filter(timetable_slot=slot)
                             for ts in timetable_students:
                                 SessionAttendance.objects.get_or_create(
                                     session=session,
                                     student=ts.student,
-                                    defaults={'status': 'present'}
+                                    defaults={'status': 'absent'}
                                 )
                 current_date += timedelta(days=1)
         

@@ -1,4 +1,5 @@
 from django.db import models
+from decimal import Decimal
 from people.models import Teacher
 from class_sessions.models import Session
 
@@ -23,9 +24,9 @@ class Payslip(models.Model):
     session_count = models.IntegerField()
     rate_applied = models.DecimalField(max_digits=10, decimal_places=2)
     gross_pay = models.DecimalField(max_digits=10, decimal_places=2)
-    tax_deduction = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    other_deductions = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    adjustments_total = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    tax_deduction = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    other_deductions = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    adjustments_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     net_pay = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     issued_date = models.DateField(auto_now_add=True)
