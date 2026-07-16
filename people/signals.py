@@ -60,7 +60,7 @@ def audit_session_post_save(sender, instance, created, **kwargs):
             model_name='Session',
             record_id=instance.id,
             action='create',
-            new_value=f"status={instance.status}, date={instance.session_date}",
+            new_value=f"status={instance.status}, start={instance.start_time:%d/%m/%y %H:%M}",
         )
     else:
         # Check status change
