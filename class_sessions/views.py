@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, OpenApiExample
+from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from django.db import transaction
 from django.utils import timezone
 from django.core.cache import cache
@@ -76,7 +76,26 @@ class SessionAttendanceViewSet(ModelViewSet):
 
 class GenerateSessionsView(APIView):
     permission_classes = [IsAdmin]
-    
+
+    @extend_schema(
+        summary="Generate sessions",
+        description="Batch-generate dated sessions from timetable templates for a date range.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'start_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to today'},
+                    'end_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to start_date + 14 days'},
+                },
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {'created_sessions': {'type': 'integer'}},
+            },
+        },
+    )
     @transaction.atomic
     def post(self, request):
         start_date = request.data.get('start_date', timezone.localdate())
@@ -154,15 +173,25 @@ class QRCheckInView(APIView):
         },
         responses={
             201: CheckInSerializer,
-            400: OpenApiExample(
-                'Missing or invalid token',
-                value={'error': 'check_in_token is required'},
-                response_only=True,
+            400: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Missing or invalid token',
+                        value={'error': 'check_in_token is required'},
+                        response_only=True,
+                    ),
+                ],
             ),
-            409: OpenApiExample(
-                'Already checked in',
-                value={'error': 'Student already checked in today'},
-                response_only=True,
+            409: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Already checked in',
+                        value={'error': 'Student already checked in today'},
+                        response_only=True,
+                    ),
+                ],
             ),
         },
     )
@@ -264,20 +293,35 @@ class ManualCheckInView(APIView):
         },
         responses={
             201: CheckInSerializer,
-            400: OpenApiExample(
-                'Missing or invalid student_id',
-                value={'error': 'student_id must be a valid integer'},
-                response_only=True,
+            400: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Missing or invalid student_id',
+                        value={'error': 'student_id must be a valid integer'},
+                        response_only=True,
+                    ),
+                ],
             ),
-            404: OpenApiExample(
-                'Student not found',
-                value={'error': 'Student not found'},
-                response_only=True,
+            404: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Student not found',
+                        value={'error': 'Student not found'},
+                        response_only=True,
+                    ),
+                ],
             ),
-            409: OpenApiExample(
-                'Already checked in',
-                value={'error': 'Student already checked in today'},
-                response_only=True,
+            409: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Already checked in',
+                        value={'error': 'Student already checked in today'},
+                        response_only=True,
+                    ),
+                ],
             ),
         },
     )

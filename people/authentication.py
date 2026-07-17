@@ -4,8 +4,22 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from rest_framework import authentication, exceptions
+from drf_spectacular.extensions import OpenApiAuthenticationExtension
 
 User = get_user_model()
+
+
+class ClerkJWTAuthenticationScheme(OpenApiAuthenticationExtension):
+    target_class = 'people.authentication.ClerkJWTAuthentication'
+    name = 'clerk_jwt'
+
+    def get_security_definition(self, auto_schema):
+        return {
+            'type': 'http',
+            'scheme': 'bearer',
+            'bearerFormat': 'JWT',
+            'description': 'Clerk-issued JWT token.',
+        }
 
 DEFAULT_ROLE = 'student'
 

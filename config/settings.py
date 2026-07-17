@@ -155,6 +155,10 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Core API for managing classes, timetabling, sessions, attendance, and payroll.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    'ENUM_NAME_OVERRIDES': {
+        'SessionStatusEnum': 'class_sessions.models.Session.STATUS_CHOICES',
+        'SessionAttendanceStatusEnum': 'class_sessions.models.SessionAttendance.STATUS_CHOICES',
+    },
 }
 
 # Clerk Configuration
