@@ -9,7 +9,7 @@ from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStuden
 from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer, TimetableStudentSerializer
 )
-from people.permissions import IsAdmin
+from people.permissions import IsAdmin, IsStaffOrAdmin
 
 class ClassViewSet(ModelViewSet):
     queryset = Class.objects.all()
@@ -18,7 +18,7 @@ class ClassViewSet(ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
+            return [IsStaffOrAdmin()]
         return [IsAuthenticated()]
 
 class ClassStudentViewSet(ModelViewSet):
