@@ -1,16 +1,20 @@
 from datetime import datetime, timedelta
 
-from rest_framework.viewsets import ModelViewSet
+from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiExample
 from django.db import transaction
 from django.utils import timezone
 from class_sessions.models import Session, SessionAttendance, CheckIn
-from class_sessions.serializers import SessionSerializer, SessionAttendanceSerializer, SessionAttendanceListSerializer, CheckInSerializer
-from people.permissions import IsAdmin, IsOwnerTeacher, IsStaffOrAdmin, CanCheckIn
+from class_sessions.serializers import (
+    SessionSerializer, SessionAttendanceSerializer,
+    SessionAttendanceListSerializer, CheckInSerializer,
+)
+from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal
 from people.models import Student
 from timetable.models import TimetableSlot, ClassStudent, TimetableStudent
 
@@ -122,19 +126,45 @@ class GenerateSessionsView(APIView):
         return Response({'created_sessions': created_count})
 
 
-class CheckInViewSet(ModelViewSet):
+class CheckInViewSet(ReadOnlyModelViewSet):
     queryset = CheckIn.objects.select_related('student', 'checked_by').all()
     serializer_class = CheckInSerializer
-    permission_classes = [IsStaffOrAdmin]
-
-    def perform_create(self, serializer):
-        serializer.save(checked_by=self.request.user)
+    permission_classes = [IsAuthenticatedNonTerminal]
 
 
 class QRCheckInView(APIView):
     permission_classes = [CanCheckIn]
     throttle_scope = 'checkin'
 
+    @extend_schema(
+        summary="QR code check-in",
+        description="Check in a student using their unique QR check-in token.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'check_in_token': {
+                        'type': 'string',
+                        'description': "The student's unique QR check-in token",
+                    },
+                },
+                'required': ['check_in_token'],
+            },
+        },
+        responses={
+            201: CheckInSerializer,
+            400: OpenApiExample(
+                'Missing or invalid token',
+                value={'error': 'check_in_token is required'},
+                response_only=True,
+            ),
+            409: OpenApiExample(
+                'Already checked in',
+                value={'error': 'Student already checked in today'},
+                response_only=True,
+            ),
+        },
+    )
     def post(self, request):
         token = request.data.get('check_in_token')
         if not token:
@@ -164,6 +194,40 @@ class ManualCheckInView(APIView):
     permission_classes = [CanCheckIn]
     throttle_scope = 'checkin'
 
+    @extend_schema(
+        summary="Manual check-in",
+        description="Check in a student manually using their student ID.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'student_id': {
+                        'type': 'integer',
+                        'description': 'The numeric student ID',
+                    },
+                },
+                'required': ['student_id'],
+            },
+        },
+        responses={
+            201: CheckInSerializer,
+            400: OpenApiExample(
+                'Missing or invalid student_id',
+                value={'error': 'student_id must be a valid integer'},
+                response_only=True,
+            ),
+            404: OpenApiExample(
+                'Student not found',
+                value={'error': 'Student not found'},
+                response_only=True,
+            ),
+            409: OpenApiExample(
+                'Already checked in',
+                value={'error': 'Student already checked in today'},
+                response_only=True,
+            ),
+        },
+    )
     def post(self, request):
         student_id = request.data.get('student_id')
         if not student_id:

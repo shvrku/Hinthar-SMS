@@ -3,16 +3,24 @@ from rest_framework import permissions
 
 class IsAuthenticatedNonTerminal(permissions.BasePermission):
     """
-    Default DRF permission: authenticated but NOT a terminal account.
-    Terminals are locked out of all views by default — they can only
-    access endpoints that explicitly grant CanCheckIn permission.
+    Default DRF permission: admin/staff get full access,
+    terminal gets read-only. Student and teacher are blocked
+    by default — they can only access views with explicit permissions.
     """
     def has_permission(self, request, view):
-        return (
-            request.user and
-            request.user.is_authenticated and
-            request.user.role != 'terminal'
-        )
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Admin and staff get full read + write
+        if request.user.role in ('admin', 'staff'):
+            return True
+
+        # Terminal gets read-only
+        if request.user.role == 'terminal':
+            return request.method in permissions.SAFE_METHODS
+
+        # Student and teacher are blocked by default
+        return False
 
 
 class CanCheckIn(permissions.BasePermission):
