@@ -16,7 +16,7 @@ class SessionSerializer(serializers.ModelSerializer):
         model = Session
         fields = [
             'id', 'timetable_slot', 'teacher', 'class_obj',
-            'start_time', 'end_time', 'status', 'paid', 'payslip'
+            'start_time', 'end_time', 'status', 'paid'
         ]
 
 class SessionAttendanceSerializer(serializers.ModelSerializer):

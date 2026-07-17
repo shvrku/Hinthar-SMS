@@ -144,3 +144,13 @@ class IsStudentOwnerOrStaffOrAdmin(permissions.BasePermission):
         if request.user.role == 'student' and obj.user == request.user:
             return True
         return False
+
+
+class IsTerminalOrAbove(permissions.BasePermission):
+    """Allows access to terminal, admin, and staff roles."""
+    def has_permission(self, request, view):
+        return (
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('terminal', 'admin', 'staff')
+        )

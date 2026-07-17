@@ -9,14 +9,15 @@ from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, OpenApiExample
 from django.db import transaction
 from django.utils import timezone
+from django.core.cache import cache
 from class_sessions.models import Session, SessionAttendance, CheckIn
 from class_sessions.serializers import (
     SessionSerializer, SessionAttendanceSerializer,
     SessionAttendanceListSerializer, CheckInSerializer,
 )
-from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal
-from people.models import Student
-from timetable.models import TimetableSlot, ClassStudent, TimetableStudent
+from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
+from people.models import Student, User, Teacher, Staff, Subject
+from timetable.models import TimetableSlot, ClassStudent, TimetableStudent, Class
 
 class SessionViewSet(ModelViewSet):
     queryset = Session.objects.all()
@@ -188,6 +189,58 @@ class QRCheckInView(APIView):
 
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class StatsView(APIView):
+    permission_classes = [IsTerminalOrAbove]
+    STATS_CACHE_KEY = 'stats_counts'
+    STATS_CACHE_TTL = 300  # 5 minutes
+
+    @extend_schema(
+        summary="System statistics",
+        description="Returns record counts for all tables in the system. Terminal, admin, and staff roles only.",
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'users': {'type': 'integer'},
+                    'students': {'type': 'integer'},
+                    'teachers': {'type': 'integer'},
+                    'staff': {'type': 'integer'},
+                    'subjects': {'type': 'integer'},
+                    'classes': {'type': 'integer'},
+                    'class_students': {'type': 'integer'},
+                    'timetable_slots': {'type': 'integer'},
+                    'timetable_students': {'type': 'integer'},
+                    'sessions': {'type': 'integer'},
+                    'session_attendances': {'type': 'integer'},
+                    'check_ins': {'type': 'integer'},
+                },
+            },
+        },
+    )
+    def get(self, request):
+        data = cache.get(self.STATS_CACHE_KEY)
+        if data is not None:
+            return Response(data)
+
+        models = {
+            'users': User,
+            'students': Student,
+            'teachers': Teacher,
+            'staff': Staff,
+            'subjects': Subject,
+            'classes': Class,
+            'class_students': ClassStudent,
+            'timetable_slots': TimetableSlot,
+            'timetable_students': TimetableStudent,
+            'sessions': Session,
+            'session_attendances': SessionAttendance,
+            'check_ins': CheckIn,
+        }
+        data = {key: model.objects.count() for key, model in models.items()}
+        cache.set(self.STATS_CACHE_KEY, data, self.STATS_CACHE_TTL)
+        return Response(data)
 
 
 class ManualCheckInView(APIView):

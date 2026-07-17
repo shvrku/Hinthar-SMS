@@ -20,18 +20,18 @@ def _log_action(user, model_name, record_id, action, field_name=None, old_value=
     )
 
 
-# ---- Payslip auditing ----
+# ---- Payslip auditing (Archived) ----
 
-@receiver(post_save, sender='payroll.Payslip')
-def audit_payslip_post_save(sender, instance, created, **kwargs):
-    action = 'create' if created else 'update'
-    _log_action(
-        user=getattr(instance, '_audit_user', None),
-        model_name='Payslip',
-        record_id=instance.id,
-        action=action,
-        new_value=f"status={instance.status}, net_pay={instance.net_pay}, gross_pay={instance.gross_pay}",
-    )
+# @receiver(post_save, sender='payroll.Payslip')
+# def audit_payslip_post_save(sender, instance, created, **kwargs):
+#     action = 'create' if created else 'update'
+#     _log_action(
+#         user=getattr(instance, '_audit_user', None),
+#         model_name='Payslip',
+#         record_id=instance.id,
+#         action=action,
+#         new_value=f"status={instance.status}, net_pay={instance.net_pay}, gross_pay={instance.gross_pay}",
+#     )
 
 
 # ---- Session auditing (status & paid changes) ----

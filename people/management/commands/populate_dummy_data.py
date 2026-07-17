@@ -3,9 +3,8 @@ from django.utils import timezone
 from people.models import User, Teacher, Student, Subject
 from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
 from class_sessions.models import Session, SessionAttendance
-from payroll.models import PayPeriod, Payslip, Adjustment
+# from payroll.models import PayPeriod, Payslip, Adjustment  # Archived
 from datetime import date, timedelta, time
-from decimal import Decimal
 
 
 class Command(BaseCommand):
@@ -194,50 +193,48 @@ class Command(BaseCommand):
                                 defaults={'status': 'absent'}
                             )
 
-        # --- Payroll Module ---
-        # Pay Periods
-        pay_period, created = PayPeriod.objects.get_or_create(
-            start_date=today - timedelta(days=30),
-            end_date=today
-        )
-        if created:
-            self.stdout.write(f'Created Pay Period: {pay_period}')
+        # # --- Payroll Module (Archived) ---
+        # # Pay Periods
+        # pay_period, created = PayPeriod.objects.get_or_create(
+        #     start_date=today - timedelta(days=30),
+        #     end_date=today
+        # )
+        # if created:
+        #     self.stdout.write(f'Created Pay Period: {pay_period}')
 
-        # Payslips
-        for teacher in teachers:
-            # Count sessions in the period
-            session_count = Session.objects.filter(
-                teacher=teacher,
-                start_time__date__range=(pay_period.start_date, pay_period.end_date),
-                status='completed',
-                paid=False
-            ).count()
-            if session_count > 0:
-                from decimal import Decimal
-                gross_pay = session_count * teacher.default_rate
-                tax = gross_pay * Decimal('0.15')
-                net = gross_pay - tax
-                payslip, created = Payslip.objects.get_or_create(
-                    teacher=teacher,
-                    pay_period=pay_period,
-                    defaults={
-                        'session_count': session_count,
-                        'rate_applied': teacher.default_rate,
-                        'gross_pay': gross_pay,
-                        'tax_deduction': tax,
-                        'net_pay': net,
-                        'status': 'approved'
-                    }
-                )
-                if created:
-                    self.stdout.write(f'Created Payslip: {payslip}')
+        # # Payslips
+        # for teacher in teachers:
+        #     session_count = Session.objects.filter(
+        #         teacher=teacher,
+        #         start_time__date__range=(pay_period.start_date, pay_period.end_date),
+        #         status='completed',
+        #         paid=False
+        #     ).count()
+        #     if session_count > 0:
+        #         from decimal import Decimal
+        #         gross_pay = session_count * teacher.default_rate
+        #         tax = gross_pay * Decimal('0.15')
+        #         net = gross_pay - tax
+        #         payslip, created = Payslip.objects.get_or_create(
+        #             teacher=teacher,
+        #             pay_period=pay_period,
+        #             defaults={
+        #                 'session_count': session_count,
+        #                 'rate_applied': teacher.default_rate,
+        #                 'gross_pay': gross_pay,
+        #                 'tax_deduction': tax,
+        #                 'net_pay': net,
+        #                 'status': 'approved'
+        #             }
+        #         )
+        #         if created:
+        #             self.stdout.write(f'Created Payslip: {payslip}')
 
-                    # Mark sessions as paid and link to payslip
-                    Session.objects.filter(
-                        teacher=teacher,
-                        start_time__date__range=(pay_period.start_date, pay_period.end_date),
-                        status='completed',
-                        paid=False
-                    ).update(paid=True, payslip=payslip)
+        #             Session.objects.filter(
+        #                 teacher=teacher,
+        #                 start_time__date__range=(pay_period.start_date, pay_period.end_date),
+        #                 status='completed',
+        #                 paid=False
+        #             ).update(paid=True, payslip=payslip)
 
         self.stdout.write('Dummy data populated successfully!')

@@ -9,6 +9,7 @@ router.register(r'check-ins', views.CheckInViewSet)
 
 urlpatterns = [
     # Explicit paths first, before the router, so they take priority
+    path('stats/', views.StatsView.as_view(), name='stats'),
     path('check-ins/qr/', views.QRCheckInView.as_view(), name='checkin-qr'),
     path('check-ins/manual/', views.ManualCheckInView.as_view(), name='checkin-manual'),
     path('sessions/generate/', views.GenerateSessionsView.as_view(), name='generate-sessions'),

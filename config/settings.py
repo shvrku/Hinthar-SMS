@@ -46,7 +46,7 @@ INSTALLED_APPS = [
     'people.apps.PeopleConfig',
     'timetable.apps.TimetableConfig',
     'class_sessions.apps.ClassSessionsConfig',
-    'payroll.apps.PayrollConfig',
+    'payroll.apps.PayrollConfig',  # Kept for migration graph — models/endpoints are archived
 ]
 
 MIDDLEWARE = [
