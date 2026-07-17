@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
 from people.serializers import SubjectSerializer, TeacherSerializer, StudentSerializer
+from people.models import Student
 
 class ClassSerializer(serializers.ModelSerializer):
     class Meta:
@@ -10,10 +11,16 @@ class ClassSerializer(serializers.ModelSerializer):
 class ClassStudentSerializer(serializers.ModelSerializer):
     class_obj = ClassSerializer(read_only=True)
     student = StudentSerializer(read_only=True)
-    
+    class_obj_id = serializers.PrimaryKeyRelatedField(
+        source='class_obj', queryset=Class.objects.all(), write_only=True
+    )
+    student_id = serializers.PrimaryKeyRelatedField(
+        source='student', queryset=Student.objects.all(), write_only=True
+    )
+
     class Meta:
         model = ClassStudent
-        fields = ['id', 'class_obj', 'student']
+        fields = ['id', 'class_obj', 'student', 'class_obj_id', 'student_id']
 
 class TimetableSlotSerializer(serializers.ModelSerializer):
     class_obj = ClassSerializer(read_only=True)
