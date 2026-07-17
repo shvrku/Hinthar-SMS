@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from people.models import Subject, Teacher, Student, Staff, AuditLog
 
@@ -60,5 +61,6 @@ class AuditLogSerializer(serializers.ModelSerializer):
         fields = ['id', 'user', 'user_email', 'model_name', 'record_id', 'action', 'field_name', 'old_value', 'new_value', 'timestamp']
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_user_email(self, obj):
         return obj.user.email if obj.user else None

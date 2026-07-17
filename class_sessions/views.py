@@ -6,17 +6,18 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, OpenApiExample
+from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from django.db import transaction
 from django.utils import timezone
+from django.core.cache import cache
 from class_sessions.models import Session, SessionAttendance, CheckIn
 from class_sessions.serializers import (
     SessionSerializer, SessionAttendanceSerializer,
     SessionAttendanceListSerializer, CheckInSerializer,
 )
-from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal
-from people.models import Student
-from timetable.models import TimetableSlot, ClassStudent, TimetableStudent
+from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
+from people.models import Student, User, Teacher, Staff, Subject
+from timetable.models import TimetableSlot, ClassStudent, TimetableStudent, Class
 
 class SessionViewSet(ModelViewSet):
     queryset = Session.objects.all()
@@ -75,7 +76,26 @@ class SessionAttendanceViewSet(ModelViewSet):
 
 class GenerateSessionsView(APIView):
     permission_classes = [IsAdmin]
-    
+
+    @extend_schema(
+        summary="Generate sessions",
+        description="Batch-generate dated sessions from timetable templates for a date range.",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'start_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to today'},
+                    'end_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to start_date + 14 days'},
+                },
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {'created_sessions': {'type': 'integer'}},
+            },
+        },
+    )
     @transaction.atomic
     def post(self, request):
         start_date = request.data.get('start_date', timezone.localdate())
@@ -153,15 +173,25 @@ class QRCheckInView(APIView):
         },
         responses={
             201: CheckInSerializer,
-            400: OpenApiExample(
-                'Missing or invalid token',
-                value={'error': 'check_in_token is required'},
-                response_only=True,
+            400: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Missing or invalid token',
+                        value={'error': 'check_in_token is required'},
+                        response_only=True,
+                    ),
+                ],
             ),
-            409: OpenApiExample(
-                'Already checked in',
-                value={'error': 'Student already checked in today'},
-                response_only=True,
+            409: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Already checked in',
+                        value={'error': 'Student already checked in today'},
+                        response_only=True,
+                    ),
+                ],
             ),
         },
     )
@@ -190,6 +220,58 @@ class QRCheckInView(APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+class StatsView(APIView):
+    permission_classes = [IsTerminalOrAbove]
+    STATS_CACHE_KEY = 'stats_counts'
+    STATS_CACHE_TTL = 300  # 5 minutes
+
+    @extend_schema(
+        summary="System statistics",
+        description="Returns record counts for all tables in the system. Terminal, admin, and staff roles only.",
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'users': {'type': 'integer'},
+                    'students': {'type': 'integer'},
+                    'teachers': {'type': 'integer'},
+                    'staff': {'type': 'integer'},
+                    'subjects': {'type': 'integer'},
+                    'classes': {'type': 'integer'},
+                    'class_students': {'type': 'integer'},
+                    'timetable_slots': {'type': 'integer'},
+                    'timetable_students': {'type': 'integer'},
+                    'sessions': {'type': 'integer'},
+                    'session_attendances': {'type': 'integer'},
+                    'check_ins': {'type': 'integer'},
+                },
+            },
+        },
+    )
+    def get(self, request):
+        data = cache.get(self.STATS_CACHE_KEY)
+        if data is not None:
+            return Response(data)
+
+        models = {
+            'users': User,
+            'students': Student,
+            'teachers': Teacher,
+            'staff': Staff,
+            'subjects': Subject,
+            'classes': Class,
+            'class_students': ClassStudent,
+            'timetable_slots': TimetableSlot,
+            'timetable_students': TimetableStudent,
+            'sessions': Session,
+            'session_attendances': SessionAttendance,
+            'check_ins': CheckIn,
+        }
+        data = {key: model.objects.count() for key, model in models.items()}
+        cache.set(self.STATS_CACHE_KEY, data, self.STATS_CACHE_TTL)
+        return Response(data)
+
+
 class ManualCheckInView(APIView):
     permission_classes = [CanCheckIn]
     throttle_scope = 'checkin'
@@ -211,20 +293,35 @@ class ManualCheckInView(APIView):
         },
         responses={
             201: CheckInSerializer,
-            400: OpenApiExample(
-                'Missing or invalid student_id',
-                value={'error': 'student_id must be a valid integer'},
-                response_only=True,
+            400: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Missing or invalid student_id',
+                        value={'error': 'student_id must be a valid integer'},
+                        response_only=True,
+                    ),
+                ],
             ),
-            404: OpenApiExample(
-                'Student not found',
-                value={'error': 'Student not found'},
-                response_only=True,
+            404: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Student not found',
+                        value={'error': 'Student not found'},
+                        response_only=True,
+                    ),
+                ],
             ),
-            409: OpenApiExample(
-                'Already checked in',
-                value={'error': 'Student already checked in today'},
-                response_only=True,
+            409: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Already checked in',
+                        value={'error': 'Student already checked in today'},
+                        response_only=True,
+                    ),
+                ],
             ),
         },
     )

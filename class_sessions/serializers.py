@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from class_sessions.models import Session, SessionAttendance, CheckIn
 from timetable.serializers import TimetableSlotSerializer, ClassSerializer
@@ -16,7 +17,7 @@ class SessionSerializer(serializers.ModelSerializer):
         model = Session
         fields = [
             'id', 'timetable_slot', 'teacher', 'class_obj',
-            'start_time', 'end_time', 'status', 'paid', 'payslip'
+            'start_time', 'end_time', 'status', 'paid'
         ]
 
 class SessionAttendanceSerializer(serializers.ModelSerializer):
@@ -48,9 +49,11 @@ class SessionAttendanceListSerializer(serializers.ModelSerializer):
             'student_id', 'student_name',
         ]
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_teacher_name(self, obj):
         return obj.session.teacher.name if (obj.session and obj.session.teacher) else None
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_class_name(self, obj):
         return obj.session.class_obj.name if (obj.session and obj.session.class_obj) else None
 

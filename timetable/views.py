@@ -2,6 +2,7 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema
 from django.db import transaction
 from django.db.models import Q
 from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
@@ -107,7 +108,12 @@ class TimetableStudentViewSet(ModelViewSet):
 
 class TeacherTimetableView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
+    @extend_schema(
+        summary="Teacher timetable",
+        description="Get all timetable slots for a specific teacher.",
+        responses=TimetableSlotSerializer(many=True),
+    )
     def get(self, request, teacher_id):
         slots = TimetableSlot.objects.filter(teacher_id=teacher_id)
         serializer = TimetableSlotSerializer(slots, many=True)
@@ -115,7 +121,12 @@ class TeacherTimetableView(APIView):
 
 class ClassTimetableView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
+    @extend_schema(
+        summary="Class timetable",
+        description="Get all timetable slots for a specific class.",
+        responses={200: TimetableSlotSerializer(many=True)},
+    )
     def get(self, request, class_id):
         slots = TimetableSlot.objects.filter(class_obj_id=class_id)
         serializer = TimetableSlotSerializer(slots, many=True)
