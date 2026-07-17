@@ -1,137 +1,53 @@
-# 🏫 Hinthar SMS — School Management System
+# Hinthar SMS — School Management System
 
-A modern, API-first school management system built with Django and Django REST Framework. Hinthar SMS handles **class organization, timetabling, session & attendance tracking, and teacher payroll** — everything a school administration team needs in one place.
+An API-first school management system for class organization, timetabling, session and attendance tracking, and teacher payroll.
 
----
+## API Endpoints
 
-## ✨ Features
-
-### 👥 People Management
-- Manage **teachers** (full-time & tutors), **students**, and **subjects**
-- Track contact details, employment types, and enrollment dates
-
-### 🏗️ Class Structure
-- Organize students into classes by **education level** (IAL, IG, Year 1–9) and **cohort**
-- Support for stream splits when timetable clashes occur (e.g., IG K1, IG K2)
-
-### 📅 Timetable
-- Define **recurring weekly schedules** — assign teachers, subjects, rooms, and time slots
-- **Overlap validation** prevents double-booking of teachers and rooms
-- Pivoted grid views per teacher or per class
-
-### ✅ Sessions & Attendance
-- **Batch-generate** dated sessions from timetable templates (idempotent — safe to run repeatedly)
-- Support for **ad-hoc and makeup sessions** outside the regular timetable
-- Teachers mark session status (completed, cancelled, no-show) and record **student attendance** (present, absent, late)
-
-### 💰 Teacher Payroll
-- **Preview → Confirm** workflow to catch errors before they're permanent
-- Payslips are **frozen snapshots** — once confirmed, values are never silently recalculated
-- Corrections happen through a dedicated **Adjustments** system, not by editing locked records
-- Atomic locking prevents double-payment on concurrent confirmations
-
-### 🔒 Security & Auth
-- **Clerk-based authentication** (OIDC/JWT) — login, MFA, and session management handled externally
-- Role-based permissions: **Admin**, **Teacher**, **Student** — enforced at the API level
-- JIT (Just-In-Time) user provisioning on first login
-
-### 📋 Audit Trail
-- Automatic logging of all payslip and session status changes for accountability
-
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology | Why |
-|---|---|---|
-| **Backend** | Django + Django REST Framework | Built-in admin, mature permissions, ideal for CRUD-heavy internal tools |
-| **Database** | PostgreSQL (Neon) | Managed, portable, supports Row-Level Security |
-| **Auth** | Clerk (OIDC) | Handles login, MFA, and sessions outside app code |
-| **API Docs** | drf-spectacular (OpenAPI 3) | Auto-generated, interactive API documentation |
-| **Production** | Render (native Python) | Auto-deploy from Git, managed infrastructure |
-| **Frontend** | Decoupled (any framework) | Consumes the REST API — build or rebuild the UI independently |
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-- Python 3.12+
-- A [Clerk](https://clerk.com) account for authentication
-
-### Local Development
-
-```bash
-# Clone the repository
-git clone https://github.com/your-username/Hinthar-SMS.git
-cd Hinthar-SMS
-
-# Create a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment variables
-cp .env.example .env
-# Edit .env with your DATABASE_URL, Clerk keys, etc.
-
-# Run migrations
-python manage.py migrate
-
-# Start the development server
-python manage.py runserver
-```
-
-### Deployment (Render)
-
-The production backend is deployed on [Render](https://render.com) as a native Python service with auto-deploy from the main branch. A `render.yaml` Blueprint is included — just connect your repo on Render and it handles the rest. The production database is Render's managed PostgreSQL (or Neon).
-
----
-
-## 📡 API Overview
-
-All endpoints are versioned under `/api/v1/`. Key resources:
+All endpoints are versioned under `/api/v1/`. Full interactive docs at `/api/v1/docs/` (Swagger UI).
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/v1/me` | Current user profile (JIT provisioned) |
+| `GET /api/v1/me` | Current user profile |
 | `/api/v1/teachers/` | Teacher CRUD |
 | `/api/v1/students/` | Student CRUD |
+| `/api/v1/staff/` | Staff CRUD |
 | `/api/v1/classes/` | Class & enrollment management |
+| `/api/v1/subjects/` | Subject management |
 | `/api/v1/timetable-slots/` | Recurring timetable definitions |
+| `/api/v1/timetable-students/` | Per-slot student assignments |
 | `/api/v1/sessions/` | Session generation, status & attendance |
+| `/api/v1/session-attendances/` | Per-student attendance records |
+| `/api/v1/check-ins/` | Daily check-in records |
 | `/api/v1/payslips/` | Payroll preview, confirmation & history |
 | `/api/v1/adjustments/` | Payroll corrections |
+| `/api/v1/stats/` | System-wide record counts |
 
-Full interactive documentation available at `/api/v1/docs/` (Swagger UI) once the server is running.
+## What It Does
 
----
+- **People Management** — Manage teachers, students, staff, and subjects.
+- **Class Structure** — Organize students into classes by education level and cohort.
+- **Timetabling** — Define recurring weekly schedules with overlap validation. Support for stream splits when clashes occur.
+- **Sessions & Attendance** — Batch-generate dated sessions from timetable templates. Teachers record session status and student attendance.
+- **Teacher Payroll** — Preview-then-confirm workflow with frozen payslip snapshots. Corrections handled through a dedicated adjustments system.
+- **Authentication & Permissions** — Clerk-based authentication with role-based access control (admin, teacher, staff, terminal).
+- **Audit Trail** — Automatic logging of payslip and session changes for accountability.
 
-## 📦 Project Status
+## Tech Stack
 
-| Phase | Status |
+| Layer | Technology |
 |---|---|
-| Phase 1 — Project Foundation & Auth | 🔲 Not started |
-| Phase 2 — Core Models & Class Structure | 🔲 Not started |
-| Phase 3 — Timetable | 🔲 Not started |
-| Phase 4 — Sessions & Attendance | 🔲 Not started |
-| Phase 5 — Payroll | 🔲 Not started |
-| Phase 6 — Audit Layer | 🔲 Not started |
+| Backend | Django + Django REST Framework |
+| Database | PostgreSQL |
+| Auth | Clerk (OIDC/JWT) |
+| API Docs | drf-spectacular (OpenAPI 3) |
 
----
+## Roadmap
 
-## 🗺️ Future Roadmap
+- [ ] **Payroll Management** — Payroll periods, bulk payslip generation, payment tracking, and reporting.
+- [ ] **Timetable & Session Logic** — Polish session generation edge cases, handle cancellations and rescheduling.
+- [ ] **Academic Records** — Exams, results, and report cards.
 
-- **Academic Records Module** — Exams, results, and report cards (designed to slot in without disrupting the existing structure)
+## License
 
----
-
-## 📄 License
-
-This project is private and intended for internal school administration use.
-
----
-
-> Built with ❤️ for better school administration.
+Private — intended for internal school administration use.
