@@ -32,10 +32,11 @@ class TeacherAdmin(admin.ModelAdmin):
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'dob', 'enrollment_date', 'user')
+    list_display = ('id', 'name', 'dob', 'enrollment_date', 'user', 'check_in_token')
     list_filter = ('enrollment_date',)
-    search_fields = ('name', 'contact')
+    search_fields = ('name', 'contact', 'check_in_token')
     raw_id_fields = ('user',)
+    readonly_fields = ('check_in_token',)
 
 
 @admin.register(Staff)

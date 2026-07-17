@@ -38,7 +38,10 @@ class Session(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['teacher']),
+            models.Index(fields=['teacher', 'start_time']),
+            models.Index(fields=['start_time']),
+            models.Index(fields=['status']),
+            models.Index(fields=['paid']),
         ]
         
     def __str__(self):
@@ -62,6 +65,10 @@ class SessionAttendance(models.Model):
                 fields=['session', 'student'],
                 name='unique_attendance_per_session_student'
             ),
+        ]
+        indexes = [
+            models.Index(fields=['student']),
+            models.Index(fields=['session', 'status']),
         ]
         
     def __str__(self):

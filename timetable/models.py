@@ -71,6 +71,11 @@ class TimetableSlot(models.Model):
     end_time = models.TimeField()
     room = models.CharField(max_length=100, blank=True, null=True)
     
+    class Meta:
+        indexes = [
+            models.Index(fields=['teacher', 'day_of_week']),
+        ]
+
     def __str__(self):
         return f"{self.subject.name} - {self.teacher.name} ({self.get_day_of_week_display()} {self.start_time}-{self.end_time})"
 
