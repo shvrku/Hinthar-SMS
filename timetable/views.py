@@ -9,37 +9,22 @@ from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStuden
 from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer, TimetableStudentSerializer
 )
-from people.permissions import IsAdmin, IsStaffOrAdmin
+from people.permissions import IsAdmin, IsStaffOrAdmin, IsAdminOrReadOnlyAuthenticated, IsStaffOrAdminOrReadOnlyAuthenticated
 
 class ClassViewSet(ModelViewSet):
     queryset = Class.objects.all()
     serializer_class = ClassSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsStaffOrAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsStaffOrAdminOrReadOnlyAuthenticated]
 
 class ClassStudentViewSet(ModelViewSet):
-    queryset = ClassStudent.objects.all()
+    queryset = ClassStudent.objects.select_related('class_obj', 'student__user').all()
     serializer_class = ClassStudentSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
 class TimetableSlotViewSet(ModelViewSet):
-    queryset = TimetableSlot.objects.all()
+    queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').all()
     serializer_class = TimetableSlotSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
     
     def _validate_no_overlap(self, day, start, end, teacher, room, exclude_pk=None):
         """Check teacher and room double-booking. Raises ValidationError if overlap found."""
@@ -83,28 +68,26 @@ class TimetableSlotViewSet(ModelViewSet):
 
     @transaction.atomic
     def perform_update(self, serializer):
-        day = serializer.validated_data.get('day_of_week')
-        start = serializer.validated_data.get('start_time')
-        end = serializer.validated_data.get('end_time')
-        teacher = serializer.validated_data.get('teacher')
-        room = serializer.validated_data.get('room')
-        # Only validate overlap if time-related fields are being changed
-        if day is not None and start is not None and end is not None and teacher is not None:
-            self._validate_no_overlap(
-                day=day, start=start, end=end, teacher=teacher, room=room,
-                exclude_pk=self.get_object().pk,
-            )
+        instance = serializer.instance
+        # Merge submitted values with existing instance values for complete validation
+        day = serializer.validated_data.get('day_of_week', instance.day_of_week)
+        start = serializer.validated_data.get('start_time', instance.start_time)
+        end = serializer.validated_data.get('end_time', instance.end_time)
+        teacher = serializer.validated_data.get('teacher', instance.teacher)
+        room = serializer.validated_data.get('room', instance.room)
+        self._validate_no_overlap(
+            day=day, start=start, end=end, teacher=teacher, room=room,
+            exclude_pk=instance.pk,
+        )
         serializer.save()
 
 class TimetableStudentViewSet(ModelViewSet):
-    queryset = TimetableStudent.objects.all()
+    queryset = TimetableStudent.objects.select_related(
+        'timetable_slot__class_obj', 'timetable_slot__subject',
+        'timetable_slot__teacher__user', 'student__user',
+    ).all()
     serializer_class = TimetableStudentSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
 class TeacherTimetableView(APIView):
     permission_classes = [IsAuthenticated]
@@ -115,7 +98,7 @@ class TeacherTimetableView(APIView):
         responses=TimetableSlotSerializer(many=True),
     )
     def get(self, request, teacher_id):
-        slots = TimetableSlot.objects.filter(teacher_id=teacher_id)
+        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(teacher_id=teacher_id)
         serializer = TimetableSlotSerializer(slots, many=True)
         return Response(serializer.data)
 
@@ -128,6 +111,6 @@ class ClassTimetableView(APIView):
         responses={200: TimetableSlotSerializer(many=True)},
     )
     def get(self, request, class_id):
-        slots = TimetableSlot.objects.filter(class_obj_id=class_id)
+        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(class_obj_id=class_id)
         serializer = TimetableSlotSerializer(slots, many=True)
         return Response(serializer.data)

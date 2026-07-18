@@ -4,14 +4,13 @@ from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
-from rest_framework.response import Response
 from rest_framework import status
 from drf_spectacular.utils import extend_schema
 from people.serializers import (
     UserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
 from people.models import Subject, Teacher, Student, Staff, AuditLog
-from people.permissions import IsAdmin, IsStaffOrAdmin, IsStudentOwnerOrStaffOrAdmin
+from people.permissions import IsAdmin, IsStaffOrAdmin, IsStudentOwnerOrStaffOrAdmin, IsAdminOrReadOnlyAuthenticated
 
 User = get_user_model()
 
@@ -34,32 +33,17 @@ class MeView(APIView):
 class SubjectViewSet(ModelViewSet):
     queryset = Subject.objects.all()
     serializer_class = SubjectSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
 class TeacherViewSet(ModelViewSet):
-    queryset = Teacher.objects.all()
+    queryset = Teacher.objects.select_related('user').all()
     serializer_class = TeacherSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
 class StudentViewSet(ModelViewSet):
-    queryset = Student.objects.all()
+    queryset = Student.objects.select_related('user').all()
     serializer_class = StudentSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
     @action(detail=True, methods=['get'],
             permission_classes=[IsStudentOwnerOrStaffOrAdmin])
@@ -78,14 +62,9 @@ class StudentViewSet(ModelViewSet):
         return Response({'check_in_token': student.check_in_token})
 
 class StaffViewSet(ModelViewSet):
-    queryset = Staff.objects.all()
+    queryset = Staff.objects.select_related('user').all()
     serializer_class = StaffSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
 
 class UserViewSet(ModelViewSet):
@@ -93,12 +72,7 @@ class UserViewSet(ModelViewSet):
         'teacher_profile', 'student_profile', 'staff_profile'
     ).all()
     serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

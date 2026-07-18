@@ -39,6 +39,8 @@ def _log_action(user, model_name, record_id, action, field_name=None, old_value=
 @receiver(pre_save, sender='class_sessions.Session')
 def audit_session_pre_save(sender, instance, **kwargs):
     """Capture old values before save for status/paid field changes."""
+    if getattr(instance, '_skip_audit', False):
+        return
     if instance.pk:
         try:
             old = sender.objects.get(pk=instance.pk)
@@ -54,6 +56,8 @@ def audit_session_pre_save(sender, instance, **kwargs):
 
 @receiver(post_save, sender='class_sessions.Session')
 def audit_session_post_save(sender, instance, created, **kwargs):
+    if getattr(instance, '_skip_audit', False):
+        return
     if created:
         _log_action(
             user=getattr(instance, '_audit_user', None),

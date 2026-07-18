@@ -35,7 +35,7 @@ class Teacher(models.Model):
     name = models.CharField(max_length=255)
     employment_type = models.CharField(max_length=20, choices=EMPLOYMENT_TYPES, default='tutor')
     default_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    contact = models.TextField(blank=True, null=True)
+    contact = models.CharField(max_length=500, blank=True, null=True)
     bank_details = models.TextField(blank=True, null=True)
     # Link to user account (optional, teacher can exist without login)
     user = models.OneToOneField(
@@ -54,7 +54,7 @@ class Student(models.Model):
     name = models.CharField(max_length=255)
     dob = models.DateField(null=True, blank=True)
     enrollment_date = models.DateField(auto_now_add=True)
-    contact = models.TextField(blank=True, null=True)
+    contact = models.CharField(max_length=500, blank=True, null=True)
     check_in_token = models.CharField(max_length=64, unique=True, blank=True, editable=False)
     # Link to user account (optional, student can exist without login)
     user = models.OneToOneField(
@@ -80,7 +80,7 @@ class Student(models.Model):
 
 class Staff(models.Model):
     name = models.CharField(max_length=255)
-    contact = models.TextField(blank=True, null=True)
+    contact = models.CharField(max_length=500, blank=True, null=True)
     # Link to user account (optional, staff can exist without login)
     user = models.OneToOneField(
         User,
