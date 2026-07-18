@@ -23,7 +23,13 @@ class UserSerializer(serializers.ModelSerializer):
             'staff_profile_id',
             'is_active'
         ]
-        read_only_fields = fields
+        read_only_fields = [
+            'id', 
+            'clerk_id', 
+            'teacher_profile_id', 
+            'student_profile_id', 
+            'staff_profile_id'
+        ]
 
 class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
@@ -44,6 +50,19 @@ class StudentSerializer(serializers.ModelSerializer):
         model = Student
         fields = ['id', 'name', 'dob', 'enrollment_date', 'contact', 'user_id', 'check_in_token']
         read_only_fields = ['check_in_token']
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated:
+            user = request.user
+            is_owner = (user.role == 'student' and instance.user == user)
+            is_privileged = user.role in ('terminal', 'admin', 'staff')
+            if not (is_owner or is_privileged):
+                representation.pop('check_in_token', None)
+        else:
+            representation.pop('check_in_token', None)
+        return representation
 
 class StaffSerializer(serializers.ModelSerializer):
     user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')

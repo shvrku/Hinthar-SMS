@@ -1,8 +1,14 @@
 from django.db import models
+from django.core.exceptions import ValidationError
 from people.models import Teacher, Student, Subject
 
 
 class Class(models.Model):
+    """
+    Represents a school cohort/class.
+    NOTE: Shadowing the Python builtin name 'class' is intentional to keep API path parity 
+    with next.js dashboard routes (/classes) and avoid complex database migration renames.
+    """
     EDUCATION_LEVEL_CHOICES = [
         ('IAL', 'IAL'),
         ('IG', 'IG'),
@@ -70,6 +76,14 @@ class TimetableSlot(models.Model):
     start_time = models.TimeField()
     end_time = models.TimeField()
     room = models.CharField(max_length=100, blank=True, null=True)
+
+    def clean(self):
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError('end_time must be after start_time.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
     
     class Meta:
         indexes = [

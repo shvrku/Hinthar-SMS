@@ -43,7 +43,7 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
         token = parts[1]
 
         # Local test bypass / mock authentication for development
-        if settings.DEBUG and token.startswith("mock_token_"):
+        if settings.DEBUG and getattr(settings, 'ENABLE_MOCK_AUTH', False) and token.startswith("mock_token_"):
             return self._authenticate_mock(token)
 
         return self._authenticate_clerk(token)
@@ -101,11 +101,13 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
                 raise exceptions.AuthenticationFailed("Matching public key not found in JWKS.")
 
             # 4. Decode and verify the JWT
+            audience = getattr(settings, 'CLERK_JWT_AUDIENCE', '')
             payload = jwt.decode(
                 token,
                 public_key,
                 algorithms=['RS256'],
-                options={"verify_aud": False}
+                audience=audience or None,
+                options={"verify_aud": bool(audience)}
             )
 
         except jwt.ExpiredSignatureError:

@@ -8,7 +8,7 @@ class IsAuthenticatedNonTerminal(permissions.BasePermission):
     by default — they can only access views with explicit permissions.
     """
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        if not request.user.is_authenticated:
             return False
 
         # Admin and staff get full read + write
@@ -30,7 +30,6 @@ class CanCheckIn(permissions.BasePermission):
     """
     def has_permission(self, request, view):
         return (
-            request.user and
             request.user.is_authenticated and
             request.user.role in ('terminal', 'admin', 'staff', 'teacher')
         )
@@ -42,7 +41,6 @@ class IsAdmin(permissions.BasePermission):
     """
     def has_permission(self, request, view):
         return (
-            request.user and 
             request.user.is_authenticated and 
             request.user.role == 'admin'
         )
@@ -54,7 +52,6 @@ class IsOwnerTeacher(permissions.BasePermission):
     """
     def has_permission(self, request, view):
         return (
-            request.user and 
             request.user.is_authenticated and 
             request.user.role == 'teacher'
         )
@@ -79,7 +76,6 @@ class IsOwnerStudent(permissions.BasePermission):
     """
     def has_permission(self, request, view):
         return (
-            request.user and 
             request.user.is_authenticated and 
             request.user.role == 'student'
         )
@@ -102,7 +98,6 @@ class IsOwnerStaff(permissions.BasePermission):
     """
     def has_permission(self, request, view):
         return (
-            request.user and 
             request.user.is_authenticated and 
             request.user.role == 'staff'
         )
@@ -122,7 +117,6 @@ class IsStaffOrAdmin(permissions.BasePermission):
     """Allows access only to Staff or Admin users."""
     def has_permission(self, request, view):
         return (
-            request.user and
             request.user.is_authenticated and
             request.user.role in ('admin', 'staff')
         )
@@ -136,7 +130,7 @@ class IsStudentOwnerOrStaffOrAdmin(permissions.BasePermission):
     - Admin.
     """
     def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
+        return request.user.is_authenticated
 
     def has_object_permission(self, request, view, obj):
         if request.user.role in ('admin', 'staff'):
@@ -150,7 +144,26 @@ class IsTerminalOrAbove(permissions.BasePermission):
     """Allows access to terminal, admin, and staff roles."""
     def has_permission(self, request, view):
         return (
-            request.user and
             request.user.is_authenticated and
             request.user.role in ('terminal', 'admin', 'staff')
         )
+
+
+class IsAdminOrReadOnlyAuthenticated(permissions.BasePermission):
+    """Allows full access to Admins, and read-only access to Authenticated users."""
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.role == 'admin':
+            return True
+        return request.method in permissions.SAFE_METHODS
+
+
+class IsStaffOrAdminOrReadOnlyAuthenticated(permissions.BasePermission):
+    """Allows full access to Staff and Admins, and read-only access to Authenticated users."""
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.role in ('admin', 'staff'):
+            return True
+        return request.method in permissions.SAFE_METHODS

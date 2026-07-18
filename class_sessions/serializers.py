@@ -3,6 +3,8 @@ from rest_framework import serializers
 from class_sessions.models import Session, SessionAttendance, CheckIn
 from timetable.serializers import TimetableSlotSerializer, ClassSerializer
 from people.serializers import TeacherSerializer, StudentSerializer
+from people.models import Teacher
+from timetable.models import Class, TimetableSlot
 
 DT_FORMAT = '%d/%m/%y %H:%M:%S'
 
@@ -10,15 +12,42 @@ class SessionSerializer(serializers.ModelSerializer):
     timetable_slot = TimetableSlotSerializer(read_only=True)
     teacher = TeacherSerializer(read_only=True)
     class_obj = ClassSerializer(read_only=True)
-    start_time = serializers.DateTimeField(format=DT_FORMAT)
-    end_time = serializers.DateTimeField(format=DT_FORMAT)
+    
+    teacher_id = serializers.PrimaryKeyRelatedField(
+        source='teacher', queryset=Teacher.objects.all(), write_only=True
+    )
+    class_obj_id = serializers.PrimaryKeyRelatedField(
+        source='class_obj', queryset=Class.objects.all(), write_only=True, required=False, allow_null=True
+    )
+    timetable_slot_id = serializers.PrimaryKeyRelatedField(
+        source='timetable_slot', queryset=TimetableSlot.objects.all(), write_only=True, required=False, allow_null=True
+    )
+    
+    start_time = serializers.DateTimeField(format=DT_FORMAT, input_formats=['iso-8601', DT_FORMAT])
+    end_time = serializers.DateTimeField(format=DT_FORMAT, input_formats=['iso-8601', DT_FORMAT])
     
     class Meta:
         model = Session
         fields = [
             'id', 'timetable_slot', 'teacher', 'class_obj',
+            'teacher_id', 'class_obj_id', 'timetable_slot_id',
             'start_time', 'end_time', 'status', 'paid'
         ]
+        validators = []
+
+    def validate(self, attrs):
+        timetable_slot = attrs.get('timetable_slot')
+        start_time = attrs.get('start_time')
+        
+        if timetable_slot and start_time:
+            qs = Session.objects.filter(timetable_slot=timetable_slot, start_time=start_time)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    'timetable_slot_id': 'A session already exists for this timetable slot at this start time.'
+                })
+        return attrs
 
 class SessionAttendanceSerializer(serializers.ModelSerializer):
     session = SessionSerializer(read_only=True)
@@ -55,7 +84,7 @@ class SessionAttendanceListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_class_name(self, obj):
-        return obj.session.class_obj.name if (obj.session and obj.session.class_obj) else None
+        return str(obj.session.class_obj) if (obj.session and obj.session.class_obj) else None
 
 
 class CheckInSerializer(serializers.ModelSerializer):

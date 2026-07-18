@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.views import APIView
@@ -20,7 +20,11 @@ from people.models import Student, User, Teacher, Staff, Subject
 from timetable.models import TimetableSlot, ClassStudent, TimetableStudent, Class
 
 class SessionViewSet(ModelViewSet):
-    queryset = Session.objects.all()
+    queryset = Session.objects.select_related(
+        'teacher__user', 'class_obj',
+        'timetable_slot__class_obj', 'timetable_slot__subject',
+        'timetable_slot__teacher__user',
+    ).all()
     serializer_class = SessionSerializer
     permission_classes = [IsAuthenticated]
     
@@ -29,6 +33,9 @@ class SessionViewSet(ModelViewSet):
         teacher_id = self.request.query_params.get('teacher_id')
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
+        status_param = self.request.query_params.get('status')
+        paid_param = self.request.query_params.get('paid')
+        class_obj_id = self.request.query_params.get('class_obj_id')
         
         if teacher_id:
             qs = qs.filter(teacher_id=teacher_id)
@@ -36,6 +43,12 @@ class SessionViewSet(ModelViewSet):
             qs = qs.filter(start_time__date__gte=date_from)
         if date_to:
             qs = qs.filter(start_time__date__lte=date_to)
+        if status_param:
+            qs = qs.filter(status=status_param)
+        if paid_param:
+            qs = qs.filter(paid=paid_param.lower() == 'true')
+        if class_obj_id:
+            qs = qs.filter(class_obj_id=class_obj_id)
         
         return qs
     
@@ -48,13 +61,19 @@ class SessionViewSet(ModelViewSet):
     def status(self, request, pk=None):
         session = self.get_object()
         new_status = request.data.get('status')
-        if new_status:
-            session.status = new_status
-            session._audit_user = request.user
-            session.save()
-            serializer = self.get_serializer(session)
-            return Response(serializer.data)
-        return Response({'error': 'status is required'}, status=400)
+        if not new_status:
+            return Response({'error': 'status is required'}, status=400)
+        valid_statuses = [c[0] for c in Session.STATUS_CHOICES]
+        if new_status not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Must be one of {valid_statuses}'},
+                status=400,
+            )
+        session.status = new_status
+        session._audit_user = request.user
+        session.save()
+        serializer = self.get_serializer(session)
+        return Response(serializer.data)
 
 class SessionAttendanceViewSet(ModelViewSet):
     queryset = SessionAttendance.objects.select_related(
@@ -98,10 +117,35 @@ class GenerateSessionsView(APIView):
     )
     @transaction.atomic
     def post(self, request):
-        start_date = request.data.get('start_date', timezone.localdate())
-        end_date = request.data.get('end_date', start_date + timedelta(days=14))
+        # Parse date inputs — strings from JSON are not auto-converted to date
+        raw_start = request.data.get('start_date')
+        raw_end = request.data.get('end_date')
+        try:
+            start_date = (
+                date.fromisoformat(raw_start) if isinstance(raw_start, str) and raw_start
+                else raw_start or timezone.localdate()
+            )
+            end_date = (
+                date.fromisoformat(raw_end) if isinstance(raw_end, str) and raw_end
+                else raw_end or start_date + timedelta(days=14)
+            )
+        except ValueError:
+            return Response(
+                {'error': 'Invalid date format, use ISO 8601 (YYYY-MM-DD)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         slots = TimetableSlot.objects.select_related('teacher', 'class_obj').all()
+        
+        # Pre-fetch student rosters to avoid repeated queries inside the loop
+        class_students_map = {}
+        for cs in ClassStudent.objects.select_related('student').all():
+            class_students_map.setdefault(cs.class_obj_id, []).append(cs.student)
+        
+        slot_students_map = {}
+        for ts in TimetableStudent.objects.select_related('student').all():
+            slot_students_map.setdefault(ts.timetable_slot_id, []).append(ts.student)
+        
         created_count = 0
         
         for slot in slots:
@@ -124,23 +168,18 @@ class GenerateSessionsView(APIView):
                     )
                     if created:
                         created_count += 1
-                        # Populate attendance roster (default: absent until checked in)
-                        if slot.class_obj:
-                            class_students = ClassStudent.objects.filter(class_obj=slot.class_obj)
-                            for cs in class_students:
-                                SessionAttendance.objects.get_or_create(
-                                    session=session,
-                                    student=cs.student,
-                                    defaults={'status': 'absent'}
-                                )
-                        else:
-                            timetable_students = TimetableStudent.objects.filter(timetable_slot=slot)
-                            for ts in timetable_students:
-                                SessionAttendance.objects.get_or_create(
-                                    session=session,
-                                    student=ts.student,
-                                    defaults={'status': 'absent'}
-                                )
+                        # Build attendance roster from pre-fetched data
+                        students = (
+                            class_students_map.get(slot.class_obj_id, [])
+                            if slot.class_obj_id
+                            else slot_students_map.get(slot.id, [])
+                        )
+                        if students:
+                            SessionAttendance.objects.bulk_create(
+                                [SessionAttendance(session=session, student=s, status='absent')
+                                 for s in students],
+                                ignore_conflicts=True,
+                            )
                 current_date += timedelta(days=1)
         
         return Response({'created_sessions': created_count})
