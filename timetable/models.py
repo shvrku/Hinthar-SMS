@@ -69,7 +69,7 @@ class TimetableSlot(models.Model):
         (6, 'Sunday'),
     ]
     
-    class_obj = models.ForeignKey(Class, on_delete=models.CASCADE, related_name='timetable_slots', null=True, blank=True)
+    class_obj = models.ForeignKey(Class, on_delete=models.CASCADE, related_name='timetable_slots')
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='timetable_slots')
     teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE, related_name='timetable_slots')
     day_of_week = models.IntegerField(choices=DAY_CHOICES)
@@ -92,20 +92,4 @@ class TimetableSlot(models.Model):
 
     def __str__(self):
         return f"{self.subject.name} - {self.teacher.name} ({self.get_day_of_week_display()} {self.start_time}-{self.end_time})"
-
-
-class TimetableStudent(models.Model):
-    timetable_slot = models.ForeignKey(TimetableSlot, on_delete=models.CASCADE, related_name='timetable_students')
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='timetable_slots')
-    
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=['timetable_slot', 'student'],
-                name='unique_student_per_timetable_slot'
-            ),
-        ]
-
-    def __str__(self):
-        return f"{self.student.name} in {self.timetable_slot}"
 

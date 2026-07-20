@@ -61,7 +61,7 @@ class QRCheckInViewTests(APITestCase):
         self.assertEqual(response.data["error"], "Invalid check-in token")
 
 
-class GenerateSessionsViewTests(APITestCase):
+class GenerateClassSessionsViewTests(APITestCase):
     def setUp(self):
         self.client = APIClient()
         # Create an admin user for authentication
@@ -70,12 +70,15 @@ class GenerateSessionsViewTests(APITestCase):
             role="admin",
             clerk_id="clerk_admin_1"
         )
+        from timetable.models import Class
+        self.test_class = Class.objects.create(
+            education_level='IG', cohort_identifier='A'
+        )
 
     def test_generate_sessions_empty_start_and_end(self):
         self.client.force_authenticate(user=self.admin_user)
-        # This used to throw ValueError due to empty string in fromisoformat()
         response = self.client.post(
-            "/api/v1/sessions/generate/",
+            f"/api/v1/sessions/generate/{self.test_class.id}/",
             {"start_date": "", "end_date": ""},
             format="json"
         )
@@ -84,7 +87,7 @@ class GenerateSessionsViewTests(APITestCase):
     def test_generate_sessions_empty_end(self):
         self.client.force_authenticate(user=self.admin_user)
         response = self.client.post(
-            "/api/v1/sessions/generate/",
+            f"/api/v1/sessions/generate/{self.test_class.id}/",
             {"start_date": "2026-07-20", "end_date": ""},
             format="json"
         )
@@ -93,7 +96,7 @@ class GenerateSessionsViewTests(APITestCase):
     def test_generate_sessions_empty_start(self):
         self.client.force_authenticate(user=self.admin_user)
         response = self.client.post(
-            "/api/v1/sessions/generate/",
+            f"/api/v1/sessions/generate/{self.test_class.id}/",
             {"start_date": "", "end_date": "2026-07-25"},
             format="json"
         )
@@ -102,7 +105,7 @@ class GenerateSessionsViewTests(APITestCase):
     def test_generate_sessions_invalid_start_date(self):
         self.client.force_authenticate(user=self.admin_user)
         response = self.client.post(
-            "/api/v1/sessions/generate/",
+            f"/api/v1/sessions/generate/{self.test_class.id}/",
             {"start_date": "invalid-date", "end_date": ""},
             format="json"
         )
@@ -112,9 +115,19 @@ class GenerateSessionsViewTests(APITestCase):
     def test_generate_sessions_invalid_end_date(self):
         self.client.force_authenticate(user=self.admin_user)
         response = self.client.post(
-            "/api/v1/sessions/generate/",
+            f"/api/v1/sessions/generate/{self.test_class.id}/",
             {"start_date": "2026-07-20", "end_date": "not-a-date"},
             format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Invalid date format, use ISO 8601 (YYYY-MM-DD)")
+
+    def test_generate_sessions_class_not_found(self):
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.post(
+            "/api/v1/sessions/generate/99999/",
+            {},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+

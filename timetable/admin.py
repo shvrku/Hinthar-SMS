@@ -1,5 +1,5 @@
 from django.contrib import admin
-from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
+from timetable.models import Class, ClassStudent, TimetableSlot
 
 
 @admin.register(Class)
@@ -19,10 +19,4 @@ class ClassStudentAdmin(admin.ModelAdmin):
 class TimetableSlotAdmin(admin.ModelAdmin):
     list_display = ('id', 'subject', 'teacher', 'day_of_week', 'start_time', 'end_time', 'room')
     list_filter = ('day_of_week', 'subject', 'teacher')
-
-
-@admin.register(TimetableStudent)
-class TimetableStudentAdmin(admin.ModelAdmin):
-    list_display = ('id', 'timetable_slot', 'student')
-    list_filter = ('timetable_slot',)
 
