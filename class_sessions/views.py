@@ -15,6 +15,7 @@ from class_sessions.serializers import (
     SessionSerializer, SessionAttendanceSerializer,
     SessionAttendanceListSerializer, CheckInSerializer,
 )
+from class_sessions.utils import process_checkin_attendance
 from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
 from people.models import Student, User, Teacher, Staff, Subject
 from timetable.models import TimetableSlot, ClassStudent, Class
@@ -259,6 +260,7 @@ class QRCheckInView(APIView):
                 check_in_type='qr',
                 checked_by=request.user,
             )
+            process_checkin_attendance(checkin)
 
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -390,6 +392,7 @@ class ManualCheckInView(APIView):
                 check_in_type='manual',
                 checked_by=request.user,
             )
+            process_checkin_attendance(checkin)
 
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)

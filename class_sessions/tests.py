@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, datetime, timedelta
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
 from people.models import Student
-from class_sessions.models import CheckIn
+from class_sessions.models import CheckIn, Session, SessionAttendance
 
 User = get_user_model()
 
@@ -130,4 +131,90 @@ class GenerateClassSessionsViewTests(APITestCase):
             format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+class AttendanceAutoGenerationTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.terminal_user = User.objects.create_user(
+            username="terminal_user", role="terminal", clerk_id="clerk_term_2"
+        )
+        self.student = Student.objects.create(name="Auto Student", check_in_token="auto_token_123")
+        
+        from timetable.models import Class
+        from people.models import Teacher, Subject
+        self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='B')
+        self.teacher = Teacher.objects.create(name="Mr. Smith")
+        
+        # Create today's session
+        today = timezone.localdate()
+        
+        # Session 1: 09:00 - 10:00 (Student checks in at 09:10 -> present)
+        # Session 2: 11:00 - 12:00 (Student checks in at 09:10 -> early/present) -> Actually logic says <= 15 mins after start -> present
+        # Session 3: 08:00 - 09:00 (Student checks in at 09:10 -> after end -> absent)
+        # Session 4: 08:30 - 09:30 (Student checks in at 09:10 -> > 15 mins after start, but before end -> late)
+        
+        self.session_present = Session.objects.create(
+            teacher=self.teacher, class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
+        )
+        self.att_present = SessionAttendance.objects.create(session=self.session_present, student=self.student, status='absent')
+        
+        self.session_late = Session.objects.create(
+            teacher=self.teacher, class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=8, minute=30))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=30)))
+        )
+        self.att_late = SessionAttendance.objects.create(session=self.session_late, student=self.student, status='absent')
+        
+        self.session_absent = Session.objects.create(
+            teacher=self.teacher, class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=8, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0)))
+        )
+        self.att_absent = SessionAttendance.objects.create(session=self.session_absent, student=self.student, status='absent')
+        
+        # Session with manual override
+        self.session_override = Session.objects.create(
+            teacher=self.teacher, class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
+        )
+        self.att_override = SessionAttendance.objects.create(session=self.session_override, student=self.student, status='late')
+
+    def test_attendance_generation_on_qr_checkin(self):
+        # We want to simulate checking in at 09:10 AM exactly.
+        # But CheckIn view uses auto_now_add=True for timestamp. 
+        # So we can just create the CheckIn manually to test the utility directly, 
+        # or we mock the timezone.now in the view test.
+        # It's cleaner to test the view, but we have to manipulate the DB object afterward to simulate the exact time.
+        
+        # Actually, let's call the view to create the checkin, then override the timestamp 
+        # and run the utility function manually to have precise control over the time.
+        
+        self.client.force_authenticate(user=self.terminal_user)
+        response = self.client.post("/api/v1/check-ins/qr/", {"check_in_token": "auto_token_123"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        
+        checkin = CheckIn.objects.get(student=self.student)
+        # Override timestamp to 09:10 AM
+        checkin.timestamp = timezone.make_aware(datetime.combine(checkin.date, datetime.min.time().replace(hour=9, minute=10)))
+        checkin.save()
+        
+        # Re-run the utility to process this exact time
+        from class_sessions.utils import process_checkin_attendance
+        process_checkin_attendance(checkin)
+        
+        # Verify statuses
+        self.att_present.refresh_from_db()
+        self.assertEqual(self.att_present.status, 'present') # 9:10 is <= 9:15
+        
+        self.att_late.refresh_from_db()
+        self.assertEqual(self.att_late.status, 'late') # 9:10 is > 8:45 but <= 9:30
+        
+        self.att_absent.refresh_from_db()
+        self.assertEqual(self.att_absent.status, 'absent') # 9:10 is > 9:00
+        
+        self.att_override.refresh_from_db()
+        self.assertEqual(self.att_override.status, 'late') # was manually marked late, should not change
 
