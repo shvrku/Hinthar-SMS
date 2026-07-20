@@ -6,7 +6,6 @@ router = DefaultRouter()
 router.register(r'classes', views.ClassViewSet)
 router.register(r'class-students', views.ClassStudentViewSet)
 router.register(r'timetable-slots', views.TimetableSlotViewSet)
-router.register(r'timetable-students', views.TimetableStudentViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),

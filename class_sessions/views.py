@@ -15,9 +15,11 @@ from class_sessions.serializers import (
     SessionSerializer, SessionAttendanceSerializer,
     SessionAttendanceListSerializer, CheckInSerializer,
 )
+from class_sessions.utils import process_checkin_attendance
 from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
 from people.models import Student, User, Teacher, Staff, Subject
-from timetable.models import TimetableSlot, ClassStudent, TimetableStudent, Class
+from timetable.models import TimetableSlot, ClassStudent, Class
+from timetable.utils import generate_sessions_for_slots, get_month_end
 
 class SessionViewSet(ModelViewSet):
     queryset = Session.objects.select_related(
@@ -93,31 +95,56 @@ class SessionAttendanceViewSet(ModelViewSet):
             return SessionAttendanceListSerializer
         return SessionAttendanceSerializer
 
-class GenerateSessionsView(APIView):
+class GenerateClassSessionsView(APIView):
     permission_classes = [IsAdmin]
 
     @extend_schema(
-        summary="Generate sessions",
-        description="Batch-generate dated sessions from timetable templates for a date range.",
+        summary="Generate sessions for a class",
+        description=(
+            "Generate dated sessions from timetable slots for a specific class. "
+            "By default generates from today until the end of the current month. "
+            "Optionally accepts start_date and end_date to target a different range "
+            "(e.g. next month)."
+        ),
         request={
             'application/json': {
                 'type': 'object',
                 'properties': {
                     'start_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to today'},
-                    'end_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to start_date + 14 days'},
+                    'end_date': {'type': 'string', 'format': 'date', 'description': 'Defaults to end of month'},
                 },
             },
         },
         responses={
             200: {
                 'type': 'object',
-                'properties': {'created_sessions': {'type': 'integer'}},
+                'properties': {
+                    'class_id': {'type': 'integer'},
+                    'date_range': {
+                        'type': 'object',
+                        'properties': {
+                            'from': {'type': 'string', 'format': 'date'},
+                            'to': {'type': 'string', 'format': 'date'},
+                        },
+                    },
+                    'total_created': {'type': 'integer'},
+                    'total_already_existed': {'type': 'integer'},
+                },
             },
         },
     )
     @transaction.atomic
-    def post(self, request):
-        # Parse date inputs — strings from JSON are not auto-converted to date
+    def post(self, request, class_id):
+        # Validate class exists
+        try:
+            class_obj = Class.objects.get(pk=class_id)
+        except Class.DoesNotExist:
+            return Response(
+                {'error': f'Class with id {class_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Parse optional date overrides
         raw_start = request.data.get('start_date')
         raw_end = request.data.get('end_date')
         try:
@@ -127,62 +154,41 @@ class GenerateSessionsView(APIView):
             )
             end_date = (
                 date.fromisoformat(raw_end) if isinstance(raw_end, str) and raw_end
-                else raw_end or start_date + timedelta(days=14)
+                else raw_end or get_month_end(start_date)
             )
         except ValueError:
             return Response(
                 {'error': 'Invalid date format, use ISO 8601 (YYYY-MM-DD)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        slots = TimetableSlot.objects.select_related('teacher', 'class_obj').all()
-        
-        # Pre-fetch student rosters to avoid repeated queries inside the loop
-        class_students_map = {}
-        for cs in ClassStudent.objects.select_related('student').all():
-            class_students_map.setdefault(cs.class_obj_id, []).append(cs.student)
-        
-        slot_students_map = {}
-        for ts in TimetableStudent.objects.select_related('student').all():
-            slot_students_map.setdefault(ts.timetable_slot_id, []).append(ts.student)
-        
-        created_count = 0
-        
-        for slot in slots:
-            current_date = start_date
-            while current_date <= end_date:
-                if current_date.weekday() == slot.day_of_week:
-                    start_time = timezone.make_aware(datetime.combine(current_date, slot.start_time))
-                    end_time = timezone.make_aware(datetime.combine(current_date, slot.end_time))
-                    
-                    session, created = Session.objects.get_or_create(
-                        timetable_slot=slot,
-                        start_time=start_time,
-                        defaults={
-                            'end_time': end_time,
-                            'teacher': slot.teacher,
-                            'class_obj': slot.class_obj,
-                            'status': 'scheduled',
-                            'paid': False
-                        }
-                    )
-                    if created:
-                        created_count += 1
-                        # Build attendance roster from pre-fetched data
-                        students = (
-                            class_students_map.get(slot.class_obj_id, [])
-                            if slot.class_obj_id
-                            else slot_students_map.get(slot.id, [])
-                        )
-                        if students:
-                            SessionAttendance.objects.bulk_create(
-                                [SessionAttendance(session=session, student=s, status='absent')
-                                 for s in students],
-                                ignore_conflicts=True,
-                            )
-                current_date += timedelta(days=1)
-        
-        return Response({'created_sessions': created_count})
+
+        slots = TimetableSlot.objects.select_related('teacher', 'class_obj').filter(
+            class_obj=class_obj
+        )
+
+        created_sessions, existing_sessions = generate_sessions_for_slots(
+            slots, start_date=start_date, end_date=end_date
+        )
+
+        def _session_summary(session):
+            return {
+                'id': session.id,
+                'timetable_slot_id': session.timetable_slot_id,
+                'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
+                'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
+            }
+
+        return Response({
+            'class_id': class_id,
+            'date_range': {
+                'from': start_date.isoformat(),
+                'to': end_date.isoformat(),
+            },
+            'total_created': len(created_sessions),
+            'total_already_existed': len(existing_sessions),
+            'created': [_session_summary(s) for s in created_sessions],
+            'already_existed': [_session_summary(s) for s in existing_sessions],
+        })
 
 
 class CheckInViewSet(ReadOnlyModelViewSet):
@@ -254,6 +260,7 @@ class QRCheckInView(APIView):
                 check_in_type='qr',
                 checked_by=request.user,
             )
+            process_checkin_attendance(checkin)
 
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -279,7 +286,6 @@ class StatsView(APIView):
                     'classes': {'type': 'integer'},
                     'class_students': {'type': 'integer'},
                     'timetable_slots': {'type': 'integer'},
-                    'timetable_students': {'type': 'integer'},
                     'sessions': {'type': 'integer'},
                     'session_attendances': {'type': 'integer'},
                     'check_ins': {'type': 'integer'},
@@ -301,7 +307,6 @@ class StatsView(APIView):
             'classes': Class,
             'class_students': ClassStudent,
             'timetable_slots': TimetableSlot,
-            'timetable_students': TimetableStudent,
             'sessions': Session,
             'session_attendances': SessionAttendance,
             'check_ins': CheckIn,
@@ -387,6 +392,7 @@ class ManualCheckInView(APIView):
                 check_in_type='manual',
                 checked_by=request.user,
             )
+            process_checkin_attendance(checkin)
 
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)

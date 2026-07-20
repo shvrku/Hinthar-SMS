@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
+from timetable.models import Class, ClassStudent, TimetableSlot
 from people.serializers import SubjectSerializer, TeacherSerializer, StudentSerializer
 from people.models import Student, Subject, Teacher
 
@@ -28,7 +28,7 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
     teacher = TeacherSerializer(read_only=True)
     
     class_obj_id = serializers.PrimaryKeyRelatedField(
-        source='class_obj', queryset=Class.objects.all(), write_only=True, required=False, allow_null=True
+        source='class_obj', queryset=Class.objects.all(), write_only=True
     )
     subject_id = serializers.PrimaryKeyRelatedField(
         source='subject', queryset=Subject.objects.all(), write_only=True
@@ -44,18 +44,3 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
             'class_obj_id', 'subject_id', 'teacher_id',
             'day_of_week', 'start_time', 'end_time', 'room'
         ]
-
-class TimetableStudentSerializer(serializers.ModelSerializer):
-    timetable_slot = TimetableSlotSerializer(read_only=True)
-    student = StudentSerializer(read_only=True)
-    
-    timetable_slot_id = serializers.PrimaryKeyRelatedField(
-        source='timetable_slot', queryset=TimetableSlot.objects.all(), write_only=True
-    )
-    student_id = serializers.PrimaryKeyRelatedField(
-        source='student', queryset=Student.objects.all(), write_only=True
-    )
-    
-    class Meta:
-        model = TimetableStudent
-        fields = ['id', 'timetable_slot', 'student', 'timetable_slot_id', 'student_id']

@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from people.models import User, Teacher, Student, Subject
-from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
+from timetable.models import Class, ClassStudent, TimetableSlot
 from class_sessions.models import Session, SessionAttendance
 # from payroll.models import PayPeriod, Payslip, Adjustment  # Archived
 from datetime import date, timedelta, time
@@ -120,7 +120,7 @@ class Command(BaseCommand):
                 'end_time': time(12, 0),
             },
             {
-                'class_obj': None,
+                'class_obj': classes[2],
                 'subject': subjects[3],
                 'teacher': teachers[1],
                 'day_of_week': 3,
@@ -141,16 +141,6 @@ class Command(BaseCommand):
             timetable_slots.append(slot)
             if created:
                 self.stdout.write(f'Created Timetable Slot: {slot}')
-
-        # Timetable Students (for the tutor slot)
-        tutor_slot = timetable_slots[3]
-        for student in students[:2]:
-            ts, created = TimetableStudent.objects.get_or_create(
-                timetable_slot=tutor_slot,
-                student=student
-            )
-            if created:
-                self.stdout.write(f'Added {student.name} to tutor slot: {tutor_slot}')
 
         # --- Sessions & Attendance Module ---
         from datetime import datetime as dt
@@ -174,22 +164,13 @@ class Command(BaseCommand):
                 if created:
                     self.stdout.write(f'Created Session: {session}')
 
-                    # Attendance for class sessions
+                    # Attendance from class roster
                     if session.class_obj:
                         class_students = ClassStudent.objects.filter(class_obj=session.class_obj)
                         for cs in class_students:
                             SessionAttendance.objects.get_or_create(
                                 session=session,
                                 student=cs.student,
-                                defaults={'status': 'absent'}
-                            )
-                    # Attendance for tutor sessions
-                    elif session.timetable_slot:
-                        timetable_students = TimetableStudent.objects.filter(timetable_slot=session.timetable_slot)
-                        for ts in timetable_students:
-                            SessionAttendance.objects.get_or_create(
-                                session=session,
-                                student=ts.student,
                                 defaults={'status': 'absent'}
                             )
 

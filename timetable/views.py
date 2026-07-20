@@ -2,13 +2,15 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
 from django.db.models import Q
-from timetable.models import Class, ClassStudent, TimetableSlot, TimetableStudent
+from timetable.models import Class, ClassStudent, TimetableSlot
 from timetable.serializers import (
-    ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer, TimetableStudentSerializer
+    ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer
 )
+from timetable.utils import generate_sessions_for_slots
 from people.permissions import IsAdmin, IsStaffOrAdmin, IsAdminOrReadOnlyAuthenticated, IsStaffOrAdminOrReadOnlyAuthenticated
 
 class ClassViewSet(ModelViewSet):
@@ -55,6 +57,22 @@ class TimetableSlotViewSet(ModelViewSet):
                     f"Room '{room}' is already booked for this time slot on {day_name}."
                 )
 
+    def _build_generation_summary(self, created, existed):
+        """Build a serializable summary of generated sessions."""
+        def _session_summary(session):
+            return {
+                'id': session.id,
+                'timetable_slot_id': session.timetable_slot_id,
+                'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
+                'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
+            }
+        return {
+            'total_created': len(created),
+            'total_already_existed': len(existed),
+            'created': [_session_summary(s) for s in created],
+            'already_existed': [_session_summary(s) for s in existed],
+        }
+
     @transaction.atomic
     def perform_create(self, serializer):
         self._validate_no_overlap(
@@ -81,13 +99,56 @@ class TimetableSlotViewSet(ModelViewSet):
         )
         serializer.save()
 
-class TimetableStudentViewSet(ModelViewSet):
-    queryset = TimetableStudent.objects.select_related(
-        'timetable_slot__class_obj', 'timetable_slot__subject',
-        'timetable_slot__teacher__user', 'student__user',
-    ).all()
-    serializer_class = TimetableStudentSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    @extend_schema(
+        summary="Create a timetable slot",
+        description="Create a timetable slot and auto-generate sessions for the rest of the month. Returns the created slot along with a summary of generated sessions.",
+        responses={
+            201: TimetableSlotSerializer,  # Drf-spectacular will document the base serializer fields. We could extend this to show the extra 'sessions_generated' field.
+            400: OpenApiResponse(description="Bad Request - Validation Error (e.g., overlapping slots, missing required fields like class_obj)"),
+        }
+    )
+    def create(self, request, *args, **kwargs):
+        """Create a timetable slot and auto-generate sessions for the rest of the month."""
+        response = super().create(request, *args, **kwargs)
+        # After the slot is saved, generate sessions for it
+        slot = TimetableSlot.objects.get(pk=response.data['id'])
+        created, existed = generate_sessions_for_slots([slot])
+        response.data['sessions_generated'] = self._build_generation_summary(created, existed)
+        return response
+
+    @extend_schema(
+        summary="Update a timetable slot",
+        description="Update a timetable slot and auto-generate sessions for the rest of the month.",
+        responses={
+            200: TimetableSlotSerializer,
+            400: OpenApiResponse(description="Bad Request - Validation Error (e.g., overlapping slots)"),
+            404: OpenApiResponse(description="Not Found"),
+        }
+    )
+    def update(self, request, *args, **kwargs):
+        """Update a timetable slot and auto-generate sessions for the rest of the month."""
+        response = super().update(request, *args, **kwargs)
+        slot = TimetableSlot.objects.get(pk=response.data['id'])
+        created, existed = generate_sessions_for_slots([slot])
+        response.data['sessions_generated'] = self._build_generation_summary(created, existed)
+        return response
+
+    @extend_schema(
+        summary="Partial update a timetable slot",
+        description="Partial update a timetable slot and auto-generate sessions for the rest of the month.",
+        responses={
+            200: TimetableSlotSerializer,
+            400: OpenApiResponse(description="Bad Request - Validation Error"),
+            404: OpenApiResponse(description="Not Found"),
+        }
+    )
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update a timetable slot and auto-generate sessions for the rest of the month."""
+        response = super().partial_update(request, *args, **kwargs)
+        slot = TimetableSlot.objects.get(pk=response.data['id'])
+        created, existed = generate_sessions_for_slots([slot])
+        response.data['sessions_generated'] = self._build_generation_summary(created, existed)
+        return response
 
 class TeacherTimetableView(APIView):
     permission_classes = [IsAuthenticated]
