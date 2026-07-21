@@ -91,3 +91,60 @@ def audit_session_post_save(sender, instance, created, **kwargs):
                 old_value=old_paid,
                 new_value=instance.paid,
             )
+
+
+@receiver(pre_save, sender='class_sessions.AdHocSession')
+def audit_adhoc_session_pre_save(sender, instance, **kwargs):
+    """Capture old values before save for status/paid field changes in AdHocSession."""
+    if getattr(instance, '_skip_audit', False):
+        return
+    if instance.pk:
+        try:
+            old = sender.objects.get(pk=instance.pk)
+            instance._old_status = old.status
+            instance._old_paid = old.paid
+        except sender.DoesNotExist:
+            instance._old_status = None
+            instance._old_paid = None
+    else:
+        instance._old_status = None
+        instance._old_paid = None
+
+
+@receiver(post_save, sender='class_sessions.AdHocSession')
+def audit_adhoc_session_post_save(sender, instance, created, **kwargs):
+    if getattr(instance, '_skip_audit', False):
+        return
+    if created:
+        _log_action(
+            user=getattr(instance, '_audit_user', None),
+            model_name='AdHocSession',
+            record_id=instance.id,
+            action='create',
+            new_value=f"status={instance.status}, date={instance.date:%d/%m/%y}, start={instance.start_time:%H:%M}",
+        )
+    else:
+        # Check status change
+        old_status = getattr(instance, '_old_status', None)
+        old_paid = getattr(instance, '_old_paid', None)
+
+        if old_status is not None and old_status != instance.status:
+            _log_action(
+                user=getattr(instance, '_audit_user', None),
+                model_name='AdHocSession',
+                record_id=instance.id,
+                action='update',
+                field_name='status',
+                old_value=old_status,
+                new_value=instance.status,
+            )
+        if old_paid is not None and old_paid != instance.paid:
+            _log_action(
+                user=getattr(instance, '_audit_user', None),
+                model_name='AdHocSession',
+                record_id=instance.id,
+                action='update',
+                field_name='paid',
+                old_value=old_paid,
+                new_value=instance.paid,
+            )
