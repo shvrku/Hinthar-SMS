@@ -13,9 +13,9 @@ class Session(models.Model):
         ('no_show', 'No Show'),
     ]
     
-    timetable_slot = models.ForeignKey(TimetableSlot, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
-    teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE, related_name='sessions')
-    class_obj = models.ForeignKey(Class, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
+    timetable_slot = models.ForeignKey(TimetableSlot, on_delete=models.PROTECT, related_name='sessions')
+    teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='sessions')
+    class_obj = models.ForeignKey(Class, on_delete=models.PROTECT, related_name='sessions')
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
@@ -71,6 +71,61 @@ class SessionAttendance(models.Model):
             models.Index(fields=['session', 'status']),
         ]
         
+    def __str__(self):
+        return f"{self.student.name} - {self.get_status_display()}"
+
+
+class AdHocSession(models.Model):
+    teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='adhoc_sessions')
+    subject = models.ForeignKey('people.Subject', on_delete=models.PROTECT, related_name='adhoc_sessions')
+    date = models.DateField(db_index=True)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    status = models.CharField(max_length=20, choices=Session.STATUS_CHOICES, default='scheduled')
+    paid = models.BooleanField(default=False)
+
+    def clean(self):
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError('end_time must be after start_time.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['teacher', 'subject', 'date', 'start_time'],
+                name='unique_adhoc_session_per_start'
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['teacher', 'date']),
+            models.Index(fields=['status']),
+            models.Index(fields=['paid']),
+        ]
+
+    def __str__(self):
+        return f"Ad-Hoc: {self.subject.name} with {self.teacher.name} on {self.date:%d/%m/%y} ({self.get_status_display()})"
+
+
+class AdHocSessionAttendance(models.Model):
+    ad_hoc_session = models.ForeignKey(AdHocSession, on_delete=models.CASCADE, related_name='attendances')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='adhoc_attendances')
+    status = models.CharField(max_length=20, choices=SessionAttendance.STATUS_CHOICES, default='absent')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['ad_hoc_session', 'student'],
+                name='unique_attendance_per_adhoc_session_student'
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['student']),
+            models.Index(fields=['ad_hoc_session', 'status']),
+        ]
+
     def __str__(self):
         return f"{self.student.name} - {self.get_status_display()}"
 

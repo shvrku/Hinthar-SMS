@@ -10,10 +10,11 @@ from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from django.db import transaction
 from django.utils import timezone
 from django.core.cache import cache
-from class_sessions.models import Session, SessionAttendance, CheckIn
+from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
 from class_sessions.serializers import (
     SessionSerializer, SessionAttendanceSerializer,
     SessionAttendanceListSerializer, CheckInSerializer,
+    AdHocSessionSerializer, AdHocSessionAttendanceSerializer
 )
 from class_sessions.utils import process_checkin_attendance
 from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
@@ -396,3 +397,65 @@ class ManualCheckInView(APIView):
 
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+class AdHocSessionViewSet(ModelViewSet):
+    queryset = AdHocSession.objects.select_related('teacher__user', 'subject').all()
+    serializer_class = AdHocSessionSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        teacher_id = self.request.query_params.get('teacher_id')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        status_param = self.request.query_params.get('status')
+        subject_id = self.request.query_params.get('subject_id')
+        
+        if teacher_id:
+            qs = qs.filter(teacher_id=teacher_id)
+        if date_from:
+            qs = qs.filter(date__gte=date_from)
+        if date_to:
+            qs = qs.filter(date__lte=date_to)
+        if status_param:
+            qs = qs.filter(status=status_param)
+        if subject_id:
+            qs = qs.filter(subject_id=subject_id)
+        
+        return qs
+
+    def get_permissions(self):
+        if self.action in ['create', 'destroy']:
+            return [IsAdmin()]
+        return [IsAuthenticated()]
+
+    @action(detail=True, methods=['patch'], permission_classes=[IsOwnerTeacher])
+    def status(self, request, pk=None):
+        session = self.get_object()
+        new_status = request.data.get('status')
+        if not new_status:
+            return Response({'error': 'status is required'}, status=400)
+        valid_statuses = [c[0] for c in AdHocSession.STATUS_CHOICES]
+        if new_status not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Must be one of {valid_statuses}'},
+                status=400,
+            )
+        session.status = new_status
+        session._audit_user = request.user
+        session.save()
+        serializer = self.get_serializer(session)
+        return Response(serializer.data)
+
+
+class AdHocSessionAttendanceViewSet(ModelViewSet):
+    queryset = AdHocSessionAttendance.objects.select_related(
+        'ad_hoc_session__teacher', 'ad_hoc_session__subject', 'student'
+    ).all()
+    serializer_class = AdHocSessionAttendanceSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [(IsAdmin | IsOwnerTeacher)()]
+        return [IsAuthenticated()]

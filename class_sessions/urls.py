@@ -6,6 +6,8 @@ router = DefaultRouter()
 router.register(r'sessions', views.SessionViewSet)
 router.register(r'session-attendances', views.SessionAttendanceViewSet)
 router.register(r'check-ins', views.CheckInViewSet)
+router.register(r'adhoc-sessions', views.AdHocSessionViewSet)
+router.register(r'adhoc-session-attendances', views.AdHocSessionAttendanceViewSet)
 
 urlpatterns = [
     # Explicit paths first, before the router, so they take priority

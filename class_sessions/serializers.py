@@ -2,8 +2,8 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from class_sessions.models import Session, SessionAttendance, CheckIn
 from timetable.serializers import TimetableSlotSerializer, ClassSerializer
-from people.serializers import TeacherSerializer, StudentSerializer
-from people.models import Teacher, Student
+from people.serializers import TeacherSerializer, StudentSerializer, SubjectSerializer
+from people.models import Teacher, Student, Subject
 from timetable.models import Class, TimetableSlot
 
 DT_FORMAT = '%d/%m/%y %H:%M:%S'
@@ -17,10 +17,10 @@ class SessionSerializer(serializers.ModelSerializer):
         source='teacher', queryset=Teacher.objects.all(), write_only=True
     )
     class_obj_id = serializers.PrimaryKeyRelatedField(
-        source='class_obj', queryset=Class.objects.all(), write_only=True, required=False, allow_null=True
+        source='class_obj', queryset=Class.objects.all(), write_only=True
     )
     timetable_slot_id = serializers.PrimaryKeyRelatedField(
-        source='timetable_slot', queryset=TimetableSlot.objects.all(), write_only=True, required=False, allow_null=True
+        source='timetable_slot', queryset=TimetableSlot.objects.all(), write_only=True
     )
     
     start_time = serializers.DateTimeField(format=DT_FORMAT, input_formats=['iso-8601', DT_FORMAT])
@@ -101,3 +101,60 @@ class CheckInSerializer(serializers.ModelSerializer):
         model = CheckIn
         fields = ['id', 'student', 'student_name', 'date', 'timestamp', 'check_in_type', 'checked_by']
         read_only_fields = ['date', 'timestamp', 'checked_by']
+
+from class_sessions.models import AdHocSession, AdHocSessionAttendance
+
+class AdHocSessionSerializer(serializers.ModelSerializer):
+    teacher = TeacherSerializer(read_only=True)
+    subject = SubjectSerializer(read_only=True)
+    
+    teacher_id = serializers.PrimaryKeyRelatedField(
+        source='teacher', queryset=Teacher.objects.all(), write_only=True
+    )
+    subject_id = serializers.PrimaryKeyRelatedField(
+        source='subject', queryset=Subject.objects.all(), write_only=True
+    )
+    
+    start_time = serializers.TimeField()
+    end_time = serializers.TimeField()
+    
+    class Meta:
+        model = AdHocSession
+        fields = [
+            'id', 'teacher', 'subject', 'teacher_id', 'subject_id',
+            'date', 'start_time', 'end_time', 'status', 'paid'
+        ]
+
+    def validate(self, attrs):
+        teacher = attrs.get('teacher')
+        subject = attrs.get('subject')
+        date = attrs.get('date')
+        start_time = attrs.get('start_time')
+        
+        if teacher and subject and date and start_time:
+            qs = AdHocSession.objects.filter(
+                teacher=teacher, subject=subject, date=date, start_time=start_time
+            )
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    "An ad-hoc session already exists for this teacher, subject, date, and start time."
+                )
+        return attrs
+
+class AdHocSessionAttendanceSerializer(serializers.ModelSerializer):
+    ad_hoc_session = AdHocSessionSerializer(read_only=True)
+    student = StudentSerializer(read_only=True)
+    
+    ad_hoc_session_id = serializers.PrimaryKeyRelatedField(
+        source='ad_hoc_session', queryset=AdHocSession.objects.all(), write_only=True
+    )
+    student_id = serializers.PrimaryKeyRelatedField(
+        source='student', queryset=Student.objects.all(), write_only=True
+    )
+    
+    class Meta:
+        model = AdHocSessionAttendance
+        fields = ['id', 'ad_hoc_session', 'student', 'status', 'ad_hoc_session_id', 'student_id']
+
