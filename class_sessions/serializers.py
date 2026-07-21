@@ -3,7 +3,7 @@ from rest_framework import serializers
 from class_sessions.models import Session, SessionAttendance, CheckIn
 from timetable.serializers import TimetableSlotSerializer, ClassSerializer
 from people.serializers import TeacherSerializer, StudentSerializer
-from people.models import Teacher
+from people.models import Teacher, Student
 from timetable.models import Class, TimetableSlot
 
 DT_FORMAT = '%d/%m/%y %H:%M:%S'
@@ -53,9 +53,16 @@ class SessionAttendanceSerializer(serializers.ModelSerializer):
     session = SessionSerializer(read_only=True)
     student = StudentSerializer(read_only=True)
     
+    session_id = serializers.PrimaryKeyRelatedField(
+        source='session', queryset=Session.objects.all(), write_only=True
+    )
+    student_id = serializers.PrimaryKeyRelatedField(
+        source='student', queryset=Student.objects.all(), write_only=True
+    )
+    
     class Meta:
         model = SessionAttendance
-        fields = ['id', 'session', 'student', 'status']
+        fields = ['id', 'session', 'student', 'status', 'session_id', 'student_id']
 
 
 class SessionAttendanceListSerializer(serializers.ModelSerializer):
