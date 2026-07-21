@@ -1,221 +1,470 @@
+"""
+Repopulates the database from scratch with:
+- Edexcel curriculum subjects (Y6-Y9, IGCSE, IAL)
+- Teachers named after HoYoverse + Kuro Games characters
+- Students named after HoYoverse + Kuro Games characters
+- Classes for Y6 through IAL with cohorts and streams
+- Timetable slots (weekly schedule) with realistic period layout
+- Sessions generated from timetable slots (past 2 weeks + current week)
+- Attendance records for completed sessions
+"""
+
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+from django.db import connection
 from people.models import User, Teacher, Student, Subject
 from timetable.models import Class, ClassStudent, TimetableSlot
-from class_sessions.models import Session, SessionAttendance
-# from payroll.models import PayPeriod, Payslip, Adjustment  # Archived
-from datetime import date, timedelta, time
+from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
+from datetime import date, timedelta, time, datetime as dt
+from decimal import Decimal
+import random
+import secrets
+
+random.seed(42)
+
+# ──────────────────────────────────────────────
+# Edexcel Curriculum Subjects
+# ──────────────────────────────────────────────
+SUBJECTS = [
+    # Core
+    'English Language',
+    'English Literature',
+    'Mathematics',
+    'Further Mathematics',
+    # Sciences
+    'Physics',
+    'Chemistry',
+    'Biology',
+    'Science (Combined)',
+    # Humanities
+    'History',
+    'Geography',
+    'Religious Studies',
+    # Social Sciences
+    'Business Studies',
+    'Economics',
+    'Accounting',
+    # Technology
+    'Computer Science',
+    'ICT',
+    'Design & Technology',
+    # Languages
+    'French',
+    'Spanish',
+    # Arts
+    'Art & Design',
+    'Music',
+    'Drama',
+]
+
+# ──────────────────────────────────────────────
+# Teachers — HoYoverse + Kuro Games characters
+# Format: (name, employment_type, default_rate, [subjects_they_teach])
+# ──────────────────────────────────────────────
+TEACHERS = [
+    # Genshin Impact
+    ('Albedo', 'full_time', Decimal('28.00'), ['Chemistry', 'Art & Design']),
+    ('Zhongli', 'full_time', Decimal('30.00'), ['History', 'Mathematics']),
+    ('Raiden Shogun', 'full_time', Decimal('30.00'), ['Physics', 'Religious Studies']),
+    ('Tighnari', 'full_time', Decimal('26.00'), ['Biology', 'Geography']),
+    ('Ningguang', 'full_time', Decimal('32.00'), ['Business Studies', 'Economics']),
+    ('Yae Miko', 'tutor', Decimal('35.00'), ['English Literature', 'Drama']),
+    ('Ayato', 'full_time', Decimal('28.00'), ['English Language', 'History']),
+    ('Kazuha', 'tutor', Decimal('25.00'), ['Geography', 'Music']),
+    ('Jean', 'full_time', Decimal('29.00'), ['French', 'English Language']),
+    ('Sucrose', 'tutor', Decimal('24.00'), ['Chemistry', 'Biology']),
+    ('Venti', 'tutor', Decimal('27.00'), ['Music', 'Drama']),
+    ('Alhaitham', 'full_time', Decimal('30.00'), ['Mathematics', 'Further Mathematics']),
+    ('Xiangling', 'tutor', Decimal('23.00'), ['Design & Technology', 'Art & Design']),
+    ('Hu Tao', 'tutor', Decimal('28.00'), ['English Literature', 'Drama']),
+    # Honkai: Star Rail
+    ('Welt', 'full_time', Decimal('30.00'), ['History', 'English Literature']),
+    ('Dr. Ratio', 'full_time', Decimal('32.00'), ['Mathematics', 'Physics']),
+    ('Silver Wolf', 'tutor', Decimal('35.00'), ['Computer Science', 'ICT']),
+    ('Sunday', 'full_time', Decimal('28.00'), ['Religious Studies', 'English Language']),
+    ('Aventurine', 'tutor', Decimal('33.00'), ['Economics', 'Business Studies']),
+    ('Jing Yuan', 'full_time', Decimal('29.00'), ['Physics', 'History']),
+    ('Topaz', 'tutor', Decimal('34.00'), ['Accounting', 'Business Studies']),
+    ('Bronya', 'full_time', Decimal('28.00'), ['Spanish', 'English Language']),
+    ('Himeko', 'full_time', Decimal('30.00'), ['Design & Technology', 'Physics']),
+    ('Screwllum', 'tutor', Decimal('36.00'), ['Computer Science', 'ICT']),
+    ('Acheron', 'tutor', Decimal('28.00'), ['English Literature', 'Religious Studies']),
+    # Kuro Games — Wuthering Waves
+    ('Jinhsi', 'full_time', Decimal('29.00'), ['Mathematics', 'Science (Combined)']),
+    ('Calcharo', 'tutor', Decimal('27.00'), ['Computer Science', 'Design & Technology']),
+    ('Yinlin', 'tutor', Decimal('26.00'), ['Music', 'Art & Design']),
+    ('Verina', 'full_time', Decimal('25.00'), ['Biology', 'Science (Combined)']),
+    ('Jiyan', 'full_time', Decimal('28.00'), ['Physics', 'Geography']),
+    # ZZZ
+    ('Miyabi', 'tutor', Decimal('30.00'), ['Drama', 'Music']),
+]
+
+# ──────────────────────────────────────────────
+# Classes — Y6 through IAL
+# Format: (education_level, cohort_identifier, cohort_sub_category)
+# ──────────────────────────────────────────────
+CLASSES = [
+    # Year 6
+    ('Year6', 'A', None), ('Year6', 'B', None),
+    # Year 7
+    ('Year7', 'C', None), ('Year7', 'D', None),
+    # Year 8
+    ('Year8', 'E', None), ('Year8', 'F', None),
+    # Year 9
+    ('Year9', 'G', None), ('Year9', 'H', None),
+    # IGCSE — 3 cohorts x 2 streams
+    ('IG', 'K', '1'), ('IG', 'K', '2'),
+    ('IG', 'L', '1'), ('IG', 'L', '2'),
+    ('IG', 'M', '1'), ('IG', 'M', '2'),
+    # IAL — 2 cohorts x 2 streams
+    ('IAL', 'N', '1'), ('IAL', 'N', '2'),
+    ('IAL', 'P', '1'), ('IAL', 'P', '2'),
+]
+
+# ──────────────────────────────────────────────
+# Students — HoYoverse + Kuro Games characters
+# ──────────────────────────────────────────────
+STUDENTS = [
+    # Genshin Impact
+    'Klee', 'Diona', 'Qiqi', 'Yaoyao', 'Sayu', 'Dori', 'Nahida',
+    'Fischl', 'Bennett', 'Razor', 'Barbara', 'Noelle', 'Xingqiu',
+    'Chongyun', 'Amber', 'Kaeya', 'Lisa', 'Collei', 'Yun Jin',
+    'Yanfei', 'Freminet', 'Mika', 'Lynette', 'Kuki Shinobu',
+    'Heizou', 'Gorou', 'Thoma', 'Sara', 'Candace',
+    'Nilou', 'Faruzan', 'Layla', 'Kirara', 'Charlotte',
+    'Chevreuse', 'Gaming', 'Sethos', 'Ororon', 'Kachina',
+    # Honkai: Star Rail
+    'March 7th', 'Dan Heng', 'Seele', 'Serval', 'Pela',
+    'Sushang', 'Hook', 'Clara', 'Arlan', 'Asta',
+    'Qingque', 'Guinaifen', 'Hanya', 'Xueyi',
+    'Misha', 'Lynx', 'Firefly', 'Sparkle',
+    'Feixiao', 'Moze', 'Tribbie', 'Hyacine',
+    # Wuthering Waves
+    'Rover (F)', 'Rover (M)', 'Yangyang', 'Chixia', 'Baizhi',
+    'Lingyang', 'Encore', 'Sanhua', 'Danjin', 'Yuanwu',
+    'Taoqi', 'Youhu', 'Zhezhi', 'Camellya', 'Shorekeeper',
+    'Brant', 'Cartethyia', 'Ciaccona', 'Phrolova',
+    # ZZZ
+    'Anby', 'Nicole', 'Billy', 'Corin', 'Soukaku',
+    'Nekomata', 'Piper', 'Lucy', 'Rina', 'Grace Howard',
+    'Jane Doe', 'Astra Yao', 'Pulchra', 'Trigger',
+]
+
+# Age ranges (approx) per education level for DOB generation
+LEVEL_AGE = {
+    'Year6': (10, 11), 'Year7': (11, 12), 'Year8': (12, 13),
+    'Year9': (13, 14), 'IG': (14, 16), 'IAL': (16, 18),
+}
+
+# Period structure for timetable
+PERIODS = [
+    ('P1', time(8, 0), time(8, 50)),
+    ('P2', time(8, 50), time(9, 40)),
+    ('P3', time(9, 55), time(10, 45)),
+    ('P4', time(10, 45), time(11, 35)),
+    # Lunch break
+    ('P5', time(12, 20), time(13, 10)),
+    ('P6', time(13, 10), time(14, 0)),
+    ('P7', time(14, 15), time(15, 5)),
+]
+
+# Subjects applicable per education level
+LEVEL_SUBJECTS = {
+    'Year6': [
+        'English Language', 'Mathematics', 'Science (Combined)',
+        'History', 'Geography', 'ICT', 'Art & Design', 'Music',
+        'French', 'Spanish',
+    ],
+    'Year7': [
+        'English Language', 'English Literature', 'Mathematics',
+        'Science (Combined)', 'History', 'Geography', 'ICT',
+        'Art & Design', 'Music', 'French', 'Spanish',
+        'Religious Studies', 'Drama',
+    ],
+    'Year8': [
+        'English Language', 'English Literature', 'Mathematics',
+        'Biology', 'Chemistry', 'Physics', 'History', 'Geography',
+        'Computer Science', 'Art & Design', 'Music', 'French',
+        'Spanish', 'Religious Studies', 'Drama',
+    ],
+    'Year9': [
+        'English Language', 'English Literature', 'Mathematics',
+        'Biology', 'Chemistry', 'Physics', 'History', 'Geography',
+        'Computer Science', 'Business Studies', 'Art & Design',
+        'Music', 'Design & Technology', 'French', 'Spanish',
+        'Religious Studies', 'Drama',
+    ],
+    'IG': [
+        'English Language', 'English Literature', 'Mathematics',
+        'Physics', 'Chemistry', 'Biology', 'History', 'Geography',
+        'Computer Science', 'Business Studies', 'Economics',
+        'Accounting', 'ICT', 'Art & Design', 'French', 'Spanish',
+    ],
+    'IAL': [
+        'Mathematics', 'Further Mathematics', 'Physics', 'Chemistry',
+        'Biology', 'Economics', 'Accounting', 'Business Studies',
+        'Computer Science', 'English Literature', 'History',
+    ],
+}
+
+ALL_DAYS = [0, 1, 2, 3, 4]  # Monday-Friday
+
+BULK_SIZE = 500  # batch size for bulk_create
 
 
 class Command(BaseCommand):
-    help = 'Populates the database with dummy data'
+    help = 'Repopulates the entire database with HoYoverse/Kuro-themed Edexcel curriculum data.'
+
+    def _clear_all(self):
+        """Truncate all tables in dependency order."""
+        self.stdout.write('Clearing existing data...')
+        models = [
+            CheckIn,
+            AdHocSessionAttendance,
+            SessionAttendance,
+            AdHocSession,
+            Session,
+            TimetableSlot,
+            ClassStudent,
+            Class,
+            Teacher,
+            Student,
+            Subject,
+            User,
+        ]
+        for model in models:
+            cnt, _ = model.objects.all().delete()
+            self.stdout.write(f'  Cleared {model.__name__} ({cnt} records)')
+
+        engine = connection.settings_dict['ENGINE']
+        if 'sqlite3' in engine:
+            with connection.cursor() as cursor:
+                for model in models:
+                    cursor.execute(
+                        f"DELETE FROM sqlite_sequence WHERE name='{model._meta.db_table}'"
+                    )
+            self.stdout.write('  Reset SQLite auto-increment counters')
 
     def handle(self, *args, **options):
-        self.stdout.write('Populating dummy data...')
+        self._clear_all()
 
-        # --- People Module ---
-        # Subjects
-        subjects_data = [
-            {'name': 'Mathematics'},
-            {'name': 'Physics'},
-            {'name': 'Chemistry'},
-            {'name': 'Biology'},
-            {'name': 'English'},
+        # ── 1. Subjects ──
+        self.stdout.write('\n--- Creating Subjects ---')
+        subject_map = {}
+        subjects_bulk = [Subject(name=name) for name in SUBJECTS]
+        Subject.objects.bulk_create(subjects_bulk, ignore_conflicts=True)
+        for subj in Subject.objects.all():
+            subject_map[subj.name] = subj
+        self.stdout.write(f'  Created {len(subject_map)} Subjects')
+
+        # ── 2. Teachers ──
+        self.stdout.write('\n--- Creating Teachers ---')
+        teacher_bulk = [
+            Teacher(name=t[0], employment_type=t[1], default_rate=t[2])
+            for t in TEACHERS
         ]
-        subjects = []
-        for data in subjects_data:
-            subj, created = Subject.objects.get_or_create(name=data['name'])
-            subjects.append(subj)
-            if created:
-                self.stdout.write(f'Created Subject: {subj.name}')
+        Teacher.objects.bulk_create(teacher_bulk)
+        teacher_objs = list(Teacher.objects.all())
+        self.stdout.write(f'  Created {len(teacher_objs)} Teachers')
 
-        # Teachers
-        teachers_data = [
-            {'name': 'John Smith', 'employment_type': 'full_time', 'default_rate': 25.00},
-            {'name': 'Emily Davis', 'employment_type': 'tutor', 'default_rate': 30.00},
-            {'name': 'Michael Johnson', 'employment_type': 'full_time', 'default_rate': 28.00},
+        # ── 3. Classes ──
+        self.stdout.write('\n--- Creating Classes ---')
+        class_bulk = [
+            Class(education_level=cl[0], cohort_identifier=cl[1], cohort_sub_category=cl[2])
+            for cl in CLASSES
         ]
-        teachers = []
-        for data in teachers_data:
-            teacher, created = Teacher.objects.get_or_create(
-                name=data['name'],
-                defaults={
-                    'employment_type': data['employment_type'],
-                    'default_rate': data['default_rate'],
-                }
-            )
-            teachers.append(teacher)
-            if created:
-                self.stdout.write(f'Created Teacher: {teacher.name}')
+        Class.objects.bulk_create(class_bulk)
+        class_objs = list(Class.objects.all())
+        self.stdout.write(f'  Created {len(class_objs)} Classes')
 
-        # Students
-        students_data = [
-            {'name': 'Alice Brown', 'dob': date(2010, 5, 15)},
-            {'name': 'Bob Wilson', 'dob': date(2011, 3, 22)},
-            {'name': 'Charlie Taylor', 'dob': date(2010, 8, 30)},
-            {'name': 'Diana Anderson', 'dob': date(2011, 1, 10)},
-            {'name': 'Ethan Thomas', 'dob': date(2010, 12, 5)},
-        ]
-        students = []
-        for data in students_data:
-            student, created = Student.objects.get_or_create(
-                name=data['name'],
-                defaults={'dob': data['dob']}
-            )
-            students.append(student)
-            if created:
-                self.stdout.write(f'Created Student: {student.name}')
-
-        # --- Timetable Module ---
-        # Classes
-        classes_data = [
-            {'education_level': 'IAL', 'cohort_identifier': 'E'},
-            {'education_level': 'IG', 'cohort_identifier': 'K'},
-            {'education_level': 'Year9', 'cohort_identifier': 'A'},
-        ]
-        classes = []
-        for data in classes_data:
-            class_obj, created = Class.objects.get_or_create(
-                education_level=data['education_level'],
-                cohort_identifier=data['cohort_identifier'],
-                cohort_sub_category=None
-            )
-            classes.append(class_obj)
-            if created:
-                self.stdout.write(f'Created Class: {class_obj}')
-
-        # Class Students
-        for i, student in enumerate(students):
-            class_student, created = ClassStudent.objects.get_or_create(
-                class_obj=classes[i % len(classes)],
-                student=student
-            )
-            if created:
-                self.stdout.write(f'Enrolled {student.name} in {class_student.class_obj}')
-
-        # Timetable Slots
-        timetable_slots_data = [
-            {
-                'class_obj': classes[0],
-                'subject': subjects[0],
-                'teacher': teachers[0],
-                'day_of_week': 0,
-                'start_time': time(9, 0),
-                'end_time': time(10, 0),
-            },
-            {
-                'class_obj': classes[0],
-                'subject': subjects[1],
-                'teacher': teachers[1],
-                'day_of_week': 1,
-                'start_time': time(10, 0),
-                'end_time': time(11, 0),
-            },
-            {
-                'class_obj': classes[1],
-                'subject': subjects[2],
-                'teacher': teachers[2],
-                'day_of_week': 2,
-                'start_time': time(11, 0),
-                'end_time': time(12, 0),
-            },
-            {
-                'class_obj': classes[2],
-                'subject': subjects[3],
-                'teacher': teachers[1],
-                'day_of_week': 3,
-                'start_time': time(14, 0),
-                'end_time': time(15, 0),
-            },
-        ]
-        timetable_slots = []
-        for data in timetable_slots_data:
-            slot, created = TimetableSlot.objects.get_or_create(
-                class_obj=data['class_obj'],
-                subject=data['subject'],
-                teacher=data['teacher'],
-                day_of_week=data['day_of_week'],
-                start_time=data['start_time'],
-                defaults={'end_time': data['end_time']}
-            )
-            timetable_slots.append(slot)
-            if created:
-                self.stdout.write(f'Created Timetable Slot: {slot}')
-
-        # --- Sessions & Attendance Module ---
-        from datetime import datetime as dt
+        # ── 4. Students ──
+        self.stdout.write('\n--- Creating Students ---')
         today = date.today()
-        for i in range(10):
-            session_date = today - timedelta(days=i)
-            for slot in timetable_slots:
-                start_time = timezone.make_aware(dt.combine(session_date, slot.start_time))
-                end_time = timezone.make_aware(dt.combine(session_date, slot.end_time))
-                session, created = Session.objects.get_or_create(
-                    timetable_slot=slot,
-                    start_time=start_time,
-                    defaults={
-                        'end_time': end_time,
-                        'teacher': slot.teacher,
-                        'class_obj': slot.class_obj,
-                        'status': 'completed' if i > 2 else 'scheduled',
-                        'paid': i > 5
-                    }
-                )
-                if created:
-                    self.stdout.write(f'Created Session: {session}')
+        shuffled = list(STUDENTS)
+        random.shuffle(shuffled)
 
-                    # Attendance from class roster
-                    if session.class_obj:
-                        class_students = ClassStudent.objects.filter(class_obj=session.class_obj)
-                        for cs in class_students:
-                            SessionAttendance.objects.get_or_create(
-                                session=session,
-                                student=cs.student,
-                                defaults={'status': 'absent'}
-                            )
+        student_objs = []
+        enrollment_bulk = []
+        for i, name in enumerate(shuffled):
+            cls = class_objs[i % len(class_objs)]
+            edu_level = cls.education_level
+            age_min, age_max = LEVEL_AGE.get(edu_level, (14, 16))
+            birth_year = today.year - random.randint(age_min, age_max)
+            birth_month = random.randint(1, 12)
+            birth_day = random.randint(1, 28)
+            dob = date(birth_year, birth_month, birth_day)
 
-        # # --- Payroll Module (Archived) ---
-        # # Pay Periods
-        # pay_period, created = PayPeriod.objects.get_or_create(
-        #     start_date=today - timedelta(days=30),
-        #     end_date=today
-        # )
-        # if created:
-        #     self.stdout.write(f'Created Pay Period: {pay_period}')
+            student = Student(
+                name=name, dob=dob,
+                check_in_token=secrets.token_urlsafe(32),
+            )
+            student_objs.append(student)
 
-        # # Payslips
-        # for teacher in teachers:
-        #     session_count = Session.objects.filter(
-        #         teacher=teacher,
-        #         start_time__date__range=(pay_period.start_date, pay_period.end_date),
-        #         status='completed',
-        #         paid=False
-        #     ).count()
-        #     if session_count > 0:
-        #         from decimal import Decimal
-        #         gross_pay = session_count * teacher.default_rate
-        #         tax = gross_pay * Decimal('0.15')
-        #         net = gross_pay - tax
-        #         payslip, created = Payslip.objects.get_or_create(
-        #             teacher=teacher,
-        #             pay_period=pay_period,
-        #             defaults={
-        #                 'session_count': session_count,
-        #                 'rate_applied': teacher.default_rate,
-        #                 'gross_pay': gross_pay,
-        #                 'tax_deduction': tax,
-        #                 'net_pay': net,
-        #                 'status': 'approved'
-        #             }
-        #         )
-        #         if created:
-        #             self.stdout.write(f'Created Payslip: {payslip}')
+        Student.objects.bulk_create(student_objs)
+        student_objs = list(Student.objects.all())
 
-        #             Session.objects.filter(
-        #                 teacher=teacher,
-        #                 start_time__date__range=(pay_period.start_date, pay_period.end_date),
-        #                 status='completed',
-        #                 paid=False
-        #             ).update(paid=True, payslip=payslip)
+        for i, student in enumerate(student_objs):
+            cls = class_objs[i % len(class_objs)]
+            enrollment_bulk.append(ClassStudent(class_obj=cls, student=student))
 
-        self.stdout.write('Dummy data populated successfully!')
+        ClassStudent.objects.bulk_create(enrollment_bulk, ignore_conflicts=True)
+        self.stdout.write(f'  Created {len(student_objs)} Students across {len(class_objs)} Classes')
+
+        # ── 5. Timetable Slots ──
+        self.stdout.write('\n--- Creating Timetable Slots ---')
+        slot_bulk = []
+        teacher_pool = list(teacher_objs)
+
+        for cls in class_objs:
+            available_subjects = LEVEL_SUBJECTS.get(cls.education_level, SUBJECTS[:10])
+            num_subjects = min(len(available_subjects), random.randint(7, 10))
+            cls_subjects = random.sample(available_subjects, num_subjects)
+
+            random.shuffle(teacher_pool)
+            subj_teacher = {}
+            for i, subj_name in enumerate(cls_subjects):
+                subj_teacher[subj_name] = teacher_pool[i % len(teacher_pool)]
+
+            for subj_name in cls_subjects:
+                occurrences = random.randint(1, 3)
+                days = random.sample(ALL_DAYS, occurrences)
+                for day in days:
+                    period = random.choice(PERIODS)
+                    slot_bulk.append(TimetableSlot(
+                        class_obj=cls,
+                        subject=subject_map[subj_name],
+                        teacher=subj_teacher[subj_name],
+                        day_of_week=day,
+                        start_time=period[1],
+                        end_time=period[2],
+                        room=f'R{random.randint(101, 310)}',
+                    ))
+
+        TimetableSlot.objects.bulk_create(slot_bulk)
+        slot_objs = list(TimetableSlot.objects.select_related('class_obj', 'teacher', 'subject'))
+        self.stdout.write(f'  Created {len(slot_objs)} Timetable Slots')
+
+        # ── 6. Sessions (2 weeks back + current week) ──
+        self.stdout.write('\n--- Creating Sessions ---')
+        days_since_monday = today.weekday()
+        last_monday = today - timedelta(days=days_since_monday)
+        start_monday = last_monday - timedelta(weeks=2)  # only 2 weeks back
+
+        # Build a map: class_obj -> list of its slots
+        cls_slot_map = {}
+        for slot in slot_objs:
+            cls_slot_map.setdefault(slot.class_obj_id, []).append(slot)
+
+        # Build a map: class_obj_id -> list of enrolled student objects
+        cls_students_map = {}
+        for cs in ClassStudent.objects.select_related('student'):
+            cls_students_map.setdefault(cs.class_obj_id, []).append(cs.student)
+
+        session_bulk = []
+        attendance_bulk = []
+
+        for cls in class_objs:
+            cls_slots = cls_slot_map.get(cls.id, [])
+            enrolled = cls_students_map.get(cls.id, [])
+
+            for week_offset in range(3):  # 2 past + 1 current
+                week_start = start_monday + timedelta(weeks=week_offset)
+                for day_offset in range(5):
+                    session_date = week_start + timedelta(days=day_offset)
+                    day_slots = [s for s in cls_slots if s.day_of_week == day_offset]
+
+                    for slot in day_slots:
+                        start_dt = timezone.make_aware(dt.combine(session_date, slot.start_time))
+                        end_dt = timezone.make_aware(dt.combine(session_date, slot.end_time))
+
+                        if session_date < today:
+                            status = 'completed' if random.random() < 0.92 else 'cancelled'
+                        elif session_date == today:
+                            status = random.choice(['scheduled', 'completed'])
+                        else:
+                            status = 'scheduled'
+
+                        paid = status == 'completed' and random.random() < 0.7
+
+                        session = Session(
+                            timetable_slot=slot,
+                            teacher=slot.teacher,
+                            class_obj=cls,
+                            start_time=start_dt,
+                            end_time=end_dt,
+                            status=status,
+                            paid=paid,
+                        )
+                        session_bulk.append(session)
+
+                        # Flush sessions in batches to get IDs for attendance
+                        if len(session_bulk) >= BULK_SIZE:
+                            Session.objects.bulk_create(session_bulk, ignore_conflicts=True)
+                            session_bulk.clear()
+
+            # Flush remaining sessions for this class
+            if session_bulk:
+                Session.objects.bulk_create(session_bulk, ignore_conflicts=True)
+                session_bulk.clear()
+
+        # Now create attendance for completed sessions
+        self.stdout.write('  Creating Attendance Records...')
+        completed_sessions = list(
+            Session.objects.filter(status='completed')
+            .select_related('class_obj')
+            .prefetch_related('class_obj__class_students')
+        )
+
+        for session in completed_sessions:
+            class_id = session.class_obj_id
+            enrolled = cls_students_map.get(class_id, [])
+            for student in enrolled:
+                att_status = random.choices(
+                    ['present', 'absent', 'late'],
+                    weights=[75, 15, 10],
+                )[0]
+                attendance_bulk.append(SessionAttendance(
+                    session=session,
+                    student=student,
+                    status=att_status,
+                ))
+
+            if len(attendance_bulk) >= BULK_SIZE:
+                SessionAttendance.objects.bulk_create(attendance_bulk, ignore_conflicts=True)
+                attendance_bulk.clear()
+
+        if attendance_bulk:
+            SessionAttendance.objects.bulk_create(attendance_bulk, ignore_conflicts=True)
+
+        self.stdout.write(f'  Created {Session.objects.count()} Sessions')
+        self.stdout.write(f'  Created {SessionAttendance.objects.count()} Attendance Records')
+
+        # ── 7. CheckIns ──
+        self.stdout.write('\n--- Creating Check-Ins ---')
+        checkin_bulk = []
+        checkin_students = random.sample(student_objs, min(30, len(student_objs)))
+        for student in checkin_students:
+            for _ in range(random.randint(2, 5)):
+                c_date = last_monday + timedelta(days=random.randint(0, 13))
+                checkin_bulk.append(CheckIn(
+                    student=student,
+                    date=c_date,
+                    check_in_type=random.choice(['qr', 'manual']),
+                ))
+
+        CheckIn.objects.bulk_create(checkin_bulk, ignore_conflicts=True)
+        self.stdout.write(f'  Created {CheckIn.objects.count()} Check-Ins')
+
+        # ── Summary ──
+        self.stdout.write('\n' + '=' * 60)
+        self.stdout.write('POPULATION COMPLETE')
+        self.stdout.write('=' * 60)
+        self.stdout.write(f'  Subjects:           {Subject.objects.count()}')
+        self.stdout.write(f'  Teachers:           {Teacher.objects.count()}')
+        self.stdout.write(f'  Students:           {Student.objects.count()}')
+        self.stdout.write(f'  Classes:            {Class.objects.count()}')
+        self.stdout.write(f'  Class Enrollments:  {ClassStudent.objects.count()}')
+        self.stdout.write(f'  Timetable Slots:    {TimetableSlot.objects.count()}')
+        self.stdout.write(f'  Sessions:           {Session.objects.count()}')
+        self.stdout.write(f'  Attendance Records: {SessionAttendance.objects.count()}')
+        self.stdout.write(f'  Check-Ins:          {CheckIn.objects.count()}')
