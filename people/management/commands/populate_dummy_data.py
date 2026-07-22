@@ -230,7 +230,6 @@ class Command(BaseCommand):
             Teacher,
             Student,
             Subject,
-            User,
         ]
         for model in models:
             cnt, _ = model.objects.all().delete()
@@ -244,6 +243,12 @@ class Command(BaseCommand):
                         f"DELETE FROM sqlite_sequence WHERE name='{model._meta.db_table}'"
                     )
             self.stdout.write('  Reset SQLite auto-increment counters')
+        elif 'postgresql' in engine or 'postgis' in engine:
+            with connection.cursor() as cursor:
+                for model in models:
+                    seq_name = f"{model._meta.db_table}_id_seq"
+                    cursor.execute(f"ALTER SEQUENCE IF EXISTS {seq_name} RESTART WITH 1;")
+            self.stdout.write('  Reset PostgreSQL auto-increment sequence counters to 1')
 
     def handle(self, *args, **options):
         self._clear_all()

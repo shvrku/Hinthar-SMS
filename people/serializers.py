@@ -25,7 +25,6 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 
-            'clerk_id', 
             'teacher_profile_id', 
             'student_profile_id', 
             'staff_profile_id'

@@ -12,10 +12,10 @@ class ClassStudentSerializer(serializers.ModelSerializer):
     class_obj = ClassSerializer(read_only=True)
     student = StudentSerializer(read_only=True)
     class_obj_id = serializers.PrimaryKeyRelatedField(
-        source='class_obj', queryset=Class.objects.all(), write_only=True
+        source='class_obj', queryset=Class.objects.all()
     )
     student_id = serializers.PrimaryKeyRelatedField(
-        source='student', queryset=Student.objects.all(), write_only=True
+        source='student', queryset=Student.objects.all()
     )
 
     class Meta:
@@ -28,13 +28,13 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
     teacher = TeacherSerializer(read_only=True)
     
     class_obj_id = serializers.PrimaryKeyRelatedField(
-        source='class_obj', queryset=Class.objects.all(), write_only=True
+        source='class_obj', queryset=Class.objects.all()
     )
     subject_id = serializers.PrimaryKeyRelatedField(
-        source='subject', queryset=Subject.objects.all(), write_only=True
+        source='subject', queryset=Subject.objects.all()
     )
     teacher_id = serializers.PrimaryKeyRelatedField(
-        source='teacher', queryset=Teacher.objects.all(), write_only=True
+        source='teacher', queryset=Teacher.objects.all()
     )
     
     class Meta:

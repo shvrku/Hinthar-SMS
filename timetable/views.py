@@ -12,21 +12,38 @@ from timetable.serializers import (
 )
 from timetable.utils import generate_sessions_for_slots
 from people.permissions import IsAdmin, IsStaffOrAdmin, IsAdminOrReadOnlyAuthenticated, IsStaffOrAdminOrReadOnlyAuthenticated
+from people.views import BulkOperationsMixin
 
-class ClassViewSet(ModelViewSet):
-    queryset = Class.objects.all()
+
+class ClassViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = Class.objects.order_by('id')
     serializer_class = ClassSerializer
     permission_classes = [IsStaffOrAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
-class ClassStudentViewSet(ModelViewSet):
-    queryset = ClassStudent.objects.select_related('class_obj', 'student__user').all()
+
+class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = ClassStudent.objects.select_related('class_obj', 'student__user').order_by('id')
     serializer_class = ClassStudentSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
-class TimetableSlotViewSet(ModelViewSet):
-    queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').all()
+    def get_queryset(self):
+        qs = super().get_queryset()
+        class_obj_id = self.request.query_params.get('class_obj_id')
+        student_id = self.request.query_params.get('student_id')
+        if class_obj_id:
+            qs = qs.filter(class_obj_id=class_obj_id)
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        return qs
+
+
+class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').order_by('id')
     serializer_class = TimetableSlotSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
     
     def _validate_no_overlap(self, day, start, end, teacher, room, exclude_pk=None):
         """Check teacher and room double-booking. Raises ValidationError if overlap found."""
@@ -63,8 +80,12 @@ class TimetableSlotViewSet(ModelViewSet):
             return {
                 'id': session.id,
                 'timetable_slot_id': session.timetable_slot_id,
+                'teacher_id': session.teacher_id,
+                'class_obj_id': session.class_obj_id,
                 'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
                 'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
+                'status': session.status,
+                'paid': session.paid,
             }
         return {
             'total_created': len(created),
@@ -103,14 +124,13 @@ class TimetableSlotViewSet(ModelViewSet):
         summary="Create a timetable slot",
         description="Create a timetable slot and auto-generate sessions for the rest of the month. Returns the created slot along with a summary of generated sessions.",
         responses={
-            201: TimetableSlotSerializer,  # Drf-spectacular will document the base serializer fields. We could extend this to show the extra 'sessions_generated' field.
+            201: TimetableSlotSerializer,
             400: OpenApiResponse(description="Bad Request - Validation Error (e.g., overlapping slots, missing required fields like class_obj)"),
         }
     )
     def create(self, request, *args, **kwargs):
         """Create a timetable slot and auto-generate sessions for the rest of the month."""
         response = super().create(request, *args, **kwargs)
-        # After the slot is saved, generate sessions for it
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
         response.data['sessions_generated'] = self._build_generation_summary(created, existed)
@@ -150,6 +170,7 @@ class TimetableSlotViewSet(ModelViewSet):
         response.data['sessions_generated'] = self._build_generation_summary(created, existed)
         return response
 
+
 class TeacherTimetableView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -159,9 +180,15 @@ class TeacherTimetableView(APIView):
         responses=TimetableSlotSerializer(many=True),
     )
     def get(self, request, teacher_id):
-        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(teacher_id=teacher_id)
+        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(teacher_id=teacher_id).order_by('id')
         serializer = TimetableSlotSerializer(slots, many=True)
-        return Response(serializer.data)
+        return Response({
+            'count': len(serializer.data),
+            'next': None,
+            'previous': None,
+            'results': serializer.data
+        })
+
 
 class ClassTimetableView(APIView):
     permission_classes = [IsAuthenticated]
@@ -172,6 +199,11 @@ class ClassTimetableView(APIView):
         responses={200: TimetableSlotSerializer(many=True)},
     )
     def get(self, request, class_id):
-        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(class_obj_id=class_id)
+        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(class_obj_id=class_id).order_by('id')
         serializer = TimetableSlotSerializer(slots, many=True)
-        return Response(serializer.data)
+        return Response({
+            'count': len(serializer.data),
+            'next': None,
+            'previous': None,
+            'results': serializer.data
+        })

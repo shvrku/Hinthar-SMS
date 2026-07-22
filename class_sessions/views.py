@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from django.db import transaction
 from django.utils import timezone
@@ -19,17 +20,20 @@ from class_sessions.serializers import (
 from class_sessions.utils import process_checkin_attendance
 from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
 from people.models import Student, User, Teacher, Staff, Subject
+from people.views import BulkOperationsMixin
 from timetable.models import TimetableSlot, ClassStudent, Class
 from timetable.utils import generate_sessions_for_slots, get_month_end
 
-class SessionViewSet(ModelViewSet):
+
+class SessionViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Session.objects.select_related(
         'teacher__user', 'class_obj',
         'timetable_slot__class_obj', 'timetable_slot__subject',
         'timetable_slot__teacher__user',
-    ).all()
+    ).order_by('id')
     serializer_class = SessionSerializer
     permission_classes = [IsAuthenticated]
+    ordering = ['id']
     
     def get_queryset(self):
         qs = super().get_queryset()
@@ -56,9 +60,40 @@ class SessionViewSet(ModelViewSet):
         return qs
     
     def get_permissions(self):
-        if self.action in ['create', 'destroy']:
+        if self.action in ['create', 'destroy', 'bulk_delete']:
             return [IsAdmin()]
         return [IsAuthenticated()]
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.paid:
+            return Response(
+                {'error': 'Cannot delete a session that has already been paid in payroll.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        qs = self.get_queryset().filter(pk__in=ids)
+        if qs.filter(paid=True).exists():
+            return Response(
+                {'error': 'Cannot delete sessions that have already been paid in payroll.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        with transaction.atomic():
+            deleted_count, _ = qs.delete()
+        return Response(
+            {'deleted_count': deleted_count, 'deleted_ids': ids},
+            status=status.HTTP_200_OK
+        )
     
     @action(detail=True, methods=['patch'], permission_classes=[IsOwnerTeacher])
     def status(self, request, pk=None):
@@ -78,16 +113,45 @@ class SessionViewSet(ModelViewSet):
         serializer = self.get_serializer(session)
         return Response(serializer.data)
 
-class SessionAttendanceViewSet(ModelViewSet):
+
+class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = SessionAttendance.objects.select_related(
         'session', 'session__teacher', 'session__class_obj', 'session__timetable_slot',
         'student'
-    ).all()
+    ).order_by('id')
     serializer_class = SessionAttendanceSerializer
     permission_classes = [IsAuthenticated]
+    ordering = ['id']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        session_id = self.request.query_params.get('session_id')
+        student_id = self.request.query_params.get('student_id')
+        status_param = self.request.query_params.get('status')
+        teacher_id = self.request.query_params.get('teacher_id')
+        class_obj_id = self.request.query_params.get('class_obj_id')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+
+        if session_id:
+            qs = qs.filter(session_id=session_id)
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        if status_param:
+            qs = qs.filter(status=status_param)
+        if teacher_id:
+            qs = qs.filter(session__teacher_id=teacher_id)
+        if class_obj_id:
+            qs = qs.filter(session__class_obj_id=class_obj_id)
+        if date_from:
+            qs = qs.filter(session__start_time__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(session__start_time__date__lte=date_to)
+
+        return qs
     
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete']:
             return [(IsAdmin | IsOwnerTeacher)()]
         return [IsAuthenticated()]
 
@@ -95,6 +159,7 @@ class SessionAttendanceViewSet(ModelViewSet):
         if self.action == 'list':
             return SessionAttendanceListSerializer
         return SessionAttendanceSerializer
+
 
 class GenerateClassSessionsView(APIView):
     permission_classes = [IsAdmin]
@@ -136,7 +201,6 @@ class GenerateClassSessionsView(APIView):
     )
     @transaction.atomic
     def post(self, request, class_id):
-        # Validate class exists
         try:
             class_obj = Class.objects.get(pk=class_id)
         except Class.DoesNotExist:
@@ -145,7 +209,6 @@ class GenerateClassSessionsView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Parse optional date overrides
         raw_start = request.data.get('start_date')
         raw_end = request.data.get('end_date')
         try:
@@ -175,8 +238,12 @@ class GenerateClassSessionsView(APIView):
             return {
                 'id': session.id,
                 'timetable_slot_id': session.timetable_slot_id,
+                'teacher_id': session.teacher_id,
+                'class_obj_id': session.class_obj_id,
                 'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
                 'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
+                'status': session.status,
+                'paid': session.paid,
             }
 
         return Response({
@@ -192,10 +259,32 @@ class GenerateClassSessionsView(APIView):
         })
 
 
-class CheckInViewSet(ReadOnlyModelViewSet):
-    queryset = CheckIn.objects.select_related('student', 'checked_by').all()
+class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
+    queryset = CheckIn.objects.select_related('student', 'checked_by').order_by('-timestamp')
     serializer_class = CheckInSerializer
     permission_classes = [IsAuthenticatedNonTerminal]
+    ordering = ['-timestamp']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        student_id = self.request.query_params.get('student_id')
+        date_param = self.request.query_params.get('date')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        check_in_type = self.request.query_params.get('check_in_type')
+
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        if date_param:
+            qs = qs.filter(date=date_param)
+        if date_from:
+            qs = qs.filter(date__gte=date_from)
+        if date_to:
+            qs = qs.filter(date__lte=date_to)
+        if check_in_type:
+            qs = qs.filter(check_in_type=check_in_type)
+
+        return qs
 
 
 class QRCheckInView(APIView):
@@ -398,10 +487,12 @@ class ManualCheckInView(APIView):
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-class AdHocSessionViewSet(ModelViewSet):
-    queryset = AdHocSession.objects.select_related('teacher__user', 'subject').all()
+
+class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = AdHocSession.objects.select_related('teacher__user', 'subject').order_by('id')
     serializer_class = AdHocSessionSerializer
     permission_classes = [IsAuthenticated]
+    ordering = ['id']
     
     def get_queryset(self):
         qs = super().get_queryset()
@@ -425,9 +516,40 @@ class AdHocSessionViewSet(ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ['create', 'destroy']:
+        if self.action in ['create', 'destroy', 'bulk_delete']:
             return [IsAdmin()]
         return [IsAuthenticated()]
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.paid:
+            return Response(
+                {'error': 'Cannot delete an ad-hoc session that has already been paid in payroll.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        qs = self.get_queryset().filter(pk__in=ids)
+        if qs.filter(paid=True).exists():
+            return Response(
+                {'error': 'Cannot delete ad-hoc sessions that have already been paid in payroll.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        with transaction.atomic():
+            deleted_count, _ = qs.delete()
+        return Response(
+            {'deleted_count': deleted_count, 'deleted_ids': ids},
+            status=status.HTTP_200_OK
+        )
 
     @action(detail=True, methods=['patch'], permission_classes=[IsOwnerTeacher])
     def status(self, request, pk=None):
@@ -448,14 +570,30 @@ class AdHocSessionViewSet(ModelViewSet):
         return Response(serializer.data)
 
 
-class AdHocSessionAttendanceViewSet(ModelViewSet):
+class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = AdHocSessionAttendance.objects.select_related(
         'ad_hoc_session__teacher', 'ad_hoc_session__subject', 'student'
-    ).all()
+    ).order_by('id')
     serializer_class = AdHocSessionAttendanceSerializer
     permission_classes = [IsAuthenticated]
+    ordering = ['id']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        ad_hoc_session_id = self.request.query_params.get('ad_hoc_session_id')
+        student_id = self.request.query_params.get('student_id')
+        status_param = self.request.query_params.get('status')
+
+        if ad_hoc_session_id:
+            qs = qs.filter(ad_hoc_session_id=ad_hoc_session_id)
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        if status_param:
+            qs = qs.filter(status=status_param)
+
+        return qs
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete']:
             return [(IsAdmin | IsOwnerTeacher)()]
         return [IsAuthenticated()]

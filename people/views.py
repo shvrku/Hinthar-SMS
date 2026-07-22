@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
@@ -13,6 +14,49 @@ from people.models import Subject, Teacher, Student, Staff, AuditLog
 from people.permissions import IsAdmin, IsStaffOrAdmin, IsStudentOwnerOrStaffOrAdmin, IsAdminOrReadOnlyAuthenticated
 
 User = get_user_model()
+
+
+class BulkOperationsMixin:
+    """Provides reusable bulk_create and bulk_delete action endpoints."""
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        items_data = request.data.get('items', request.data)
+        if not isinstance(items_data, list):
+            return Response(
+                {'error': 'Expected a list of items or {"items": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        serializer = self.get_serializer(data=items_data, many=True)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            self.perform_bulk_create(serializer)
+        return Response(
+            {'created_count': len(serializer.data), 'items': serializer.data},
+            status=status.HTTP_201_CREATED
+        )
+
+    def perform_bulk_create(self, serializer):
+        serializer.save()
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        qs = self.get_queryset().filter(pk__in=ids)
+        with transaction.atomic():
+            deleted_count, _ = qs.delete()
+        return Response(
+            {'deleted_count': deleted_count, 'deleted_ids': ids},
+            status=status.HTTP_200_OK
+        )
+
 
 class MeView(APIView):
     """
@@ -30,20 +74,26 @@ class MeView(APIView):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
 
-class SubjectViewSet(ModelViewSet):
-    queryset = Subject.objects.all()
+
+class SubjectViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = Subject.objects.order_by('id')
     serializer_class = SubjectSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
-class TeacherViewSet(ModelViewSet):
-    queryset = Teacher.objects.select_related('user').all()
+
+class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = Teacher.objects.select_related('user').order_by('id')
     serializer_class = TeacherSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
-class StudentViewSet(ModelViewSet):
-    queryset = Student.objects.select_related('user').all()
+
+class StudentViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = Student.objects.select_related('user').order_by('id')
     serializer_class = StudentSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
     @action(detail=True, methods=['get'],
             permission_classes=[IsStudentOwnerOrStaffOrAdmin])
@@ -61,21 +111,25 @@ class StudentViewSet(ModelViewSet):
         student.regenerate_check_in_token()
         return Response({'check_in_token': student.check_in_token})
 
-class StaffViewSet(ModelViewSet):
-    queryset = Staff.objects.select_related('user').all()
+
+class StaffViewSet(BulkOperationsMixin, ModelViewSet):
+    queryset = Staff.objects.select_related('user').order_by('id')
     serializer_class = StaffSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
 
-class UserViewSet(ModelViewSet):
+class UserViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = User.objects.select_related(
         'teacher_profile', 'student_profile', 'staff_profile'
-    ).all()
+    ).order_by('id')
     serializer_class = UserSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    ordering = ['id']
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):
-    queryset = AuditLog.objects.select_related('user').all()
+    queryset = AuditLog.objects.select_related('user').order_by('-timestamp')
     serializer_class = AuditLogSerializer
     permission_classes = [IsAdmin]
+    ordering = ['-timestamp']
