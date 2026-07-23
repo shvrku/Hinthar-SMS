@@ -81,12 +81,24 @@ class SubjectViewSet(BulkOperationsMixin, ModelViewSet):
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
     ordering = ['id']
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get('summary') == 'true':
+            qs = qs.only('id', 'name')
+        return qs
+
 
 class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Teacher.objects.select_related('user').order_by('id')
     serializer_class = TeacherSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
     ordering = ['id']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get('summary') == 'true':
+            qs = qs.only('id', 'name', 'user_id')
+        return qs
 
 
 class StudentViewSet(BulkOperationsMixin, ModelViewSet):

@@ -21,6 +21,12 @@ class ClassViewSet(BulkOperationsMixin, ModelViewSet):
     permission_classes = [IsStaffOrAdminOrReadOnlyAuthenticated]
     ordering = ['id']
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get('summary') == 'true':
+            qs = qs.only('id', 'education_level', 'cohort_identifier', 'cohort_sub_category')
+        return qs
+
 
 class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = ClassStudent.objects.select_related('class_obj', 'student__user').order_by('id')

@@ -218,3 +218,88 @@ class AttendanceAutoGenerationTests(APITestCase):
         self.att_override.refresh_from_db()
         self.assertEqual(self.att_override.status, 'late') # was manually marked late, should not change
 
+
+class AttendanceMatrixViewTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="test_matrix_user", role="admin", clerk_id="clerk_matrix_1")
+        from timetable.models import Class, ClassStudent, TimetableSlot
+        from people.models import Teacher, Subject
+        
+        self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='M')
+        self.teacher = Teacher.objects.create(name="Matrix Teacher")
+        self.subject = Subject.objects.create(name="Matrix Math")
+        self.student = Student.objects.create(name="Matrix Student", check_in_token="mat_tok_1")
+        
+        ClassStudent.objects.create(class_obj=self.class_obj, student=self.student)
+        
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj, subject=self.subject, teacher=self.teacher,
+            day_of_week=0, start_time="09:00", end_time="10:00"
+        )
+        
+        today = timezone.localdate()
+        self.session = Session.objects.create(
+            timetable_slot=self.slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
+        )
+        SessionAttendance.objects.create(session=self.session, student=self.student, status='present')
+
+    def test_matrix_endpoint_success(self):
+        self.client.force_authenticate(user=self.user)
+        today = timezone.localdate()
+        response = self.client.get(
+            f"/api/v1/attendance/matrix/?class_id={self.class_obj.id}&month={today.month}&year={today.year}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["class_id"], self.class_obj.id)
+        self.assertEqual(len(response.data["sessions"]), 1)
+        self.assertEqual(len(response.data["students"]), 1)
+        self.assertEqual(response.data["students"][0]["records"][str(self.session.id)], "present")
+
+    def test_matrix_endpoint_missing_class_id(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/v1/attendance/matrix/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_matrix_endpoint_class_not_found(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/v1/attendance/matrix/?class_id=9999")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SessionFilterTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="test_filter_user", role="admin", clerk_id="clerk_filt_1")
+        from timetable.models import Class, TimetableSlot
+        from people.models import Teacher, Subject
+        
+        self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='F')
+        self.teacher = Teacher.objects.create(name="Filter Teacher")
+        self.subject = Subject.objects.create(name="Filter Physics")
+        
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj, subject=self.subject, teacher=self.teacher,
+            day_of_week=1, start_time="10:00", end_time="11:00"
+        )
+        
+        d1 = date(2026, 7, 10)
+        self.session1 = Session.objects.create(
+            timetable_slot=self.slot, teacher=self.teacher, class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(d1, datetime.min.time().replace(hour=10, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(d1, datetime.min.time().replace(hour=11, minute=0)))
+        )
+
+    def test_session_list_extended_filters(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/v1/sessions/?class_id={self.class_obj.id}&start_date=2026-07-01&end_date=2026-07-31&month=7&year=2026&subject_id={self.subject.id}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+

@@ -30,7 +30,7 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
         'teacher__user', 'class_obj',
         'timetable_slot__class_obj', 'timetable_slot__subject',
         'timetable_slot__teacher__user',
-    ).order_by('id')
+    ).prefetch_related('attendances').order_by('id')
     serializer_class = SessionSerializer
     permission_classes = [IsAuthenticated]
     ordering = ['id']
@@ -38,24 +38,33 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         teacher_id = self.request.query_params.get('teacher_id')
-        date_from = self.request.query_params.get('date_from')
-        date_to = self.request.query_params.get('date_to')
+        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
+        subject_id = self.request.query_params.get('subject_id')
+        date_from = self.request.query_params.get('date_from') or self.request.query_params.get('start_date')
+        date_to = self.request.query_params.get('date_to') or self.request.query_params.get('end_date')
+        month_param = self.request.query_params.get('month')
+        year_param = self.request.query_params.get('year')
         status_param = self.request.query_params.get('status')
         paid_param = self.request.query_params.get('paid')
-        class_obj_id = self.request.query_params.get('class_obj_id')
         
         if teacher_id:
             qs = qs.filter(teacher_id=teacher_id)
+        if class_id:
+            qs = qs.filter(class_obj_id=class_id)
+        if subject_id:
+            qs = qs.filter(timetable_slot__subject_id=subject_id)
         if date_from:
             qs = qs.filter(start_time__date__gte=date_from)
         if date_to:
             qs = qs.filter(start_time__date__lte=date_to)
+        if month_param:
+            qs = qs.filter(start_time__month=month_param)
+        if year_param:
+            qs = qs.filter(start_time__year=year_param)
         if status_param:
             qs = qs.filter(status=status_param)
         if paid_param:
             qs = qs.filter(paid=paid_param.lower() == 'true')
-        if class_obj_id:
-            qs = qs.filter(class_obj_id=class_obj_id)
         
         return qs
     
@@ -257,6 +266,119 @@ class GenerateClassSessionsView(APIView):
             'created': [_session_summary(s) for s in created_sessions],
             'already_existed': [_session_summary(s) for s in existing_sessions],
         })
+
+
+class AttendanceMatrixView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Aggregated attendance matrix for a class",
+        description="Returns combined sessions, enrolled students, and attendance matrix status map for a class in a month/year.",
+        parameters=[
+            { 'name': 'class_id', 'type': 'integer', 'required': True, 'description': 'ID of the class' },
+            { 'name': 'month', 'type': 'integer', 'required': False, 'description': 'Month number (1-12). Defaults to current month.' },
+            { 'name': 'year', 'type': 'integer', 'required': False, 'description': '4-digit year. Defaults to current year.' },
+        ],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'class_id': {'type': 'integer'},
+                    'month': {'type': 'integer'},
+                    'year': {'type': 'integer'},
+                    'sessions': {'type': 'array', 'items': {'type': 'object'}},
+                    'students': {'type': 'array', 'items': {'type': 'object'}},
+                }
+            },
+            400: OpenApiResponse(description="Bad Request - Missing or invalid parameters"),
+            404: OpenApiResponse(description="Class Not Found"),
+        }
+    )
+    def get(self, request):
+        class_id_raw = request.query_params.get('class_id')
+        if not class_id_raw:
+            return Response({'error': 'class_id query parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            class_id = int(class_id_raw)
+        except ValueError:
+            return Response({'error': 'class_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            class_obj = Class.objects.get(pk=class_id)
+        except Class.DoesNotExist:
+            return Response({'error': f'Class with id {class_id} not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        now = timezone.localdate()
+        month_raw = request.query_params.get('month')
+        year_raw = request.query_params.get('year')
+
+        try:
+            month = int(month_raw) if month_raw else now.month
+            year = int(year_raw) if year_raw else now.year
+            if not (1 <= month <= 12):
+                raise ValueError("Month out of range")
+        except ValueError:
+            return Response({'error': 'Invalid month or year parameter'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Fetch sessions for the given class, month, and year
+        sessions = Session.objects.select_related('timetable_slot__subject', 'teacher__user').filter(
+            class_obj_id=class_id,
+            start_time__year=year,
+            start_time__month=month
+        ).order_by('start_time')
+
+        session_list = [
+            {
+                'id': s.id,
+                'start_time': s.start_time.isoformat(),
+                'end_time': s.end_time.isoformat(),
+                'subject': s.timetable_slot.subject.name if s.timetable_slot and s.timetable_slot.subject else None,
+                'subject_id': s.timetable_slot.subject_id if s.timetable_slot else None,
+                'teacher_id': s.teacher_id,
+                'teacher_name': s.teacher.name,
+                'status': s.status,
+                'paid': s.paid,
+            }
+            for s in sessions
+        ]
+
+        # 2. Fetch students enrolled in this class
+        class_students = ClassStudent.objects.select_related('student').filter(
+            class_obj_id=class_id
+        ).order_by('student__name')
+
+        session_ids = [s.id for s in sessions]
+        student_ids = [cs.student_id for cs in class_students]
+
+        # 3. Batch query attendance records in a single query pass
+        attendances = SessionAttendance.objects.filter(
+            session_id__in=session_ids,
+            student_id__in=student_ids
+        ).values('session_id', 'student_id', 'status')
+
+        att_map = {(a['student_id'], a['session_id']): a['status'] for a in attendances}
+
+        student_list = []
+        for cs in class_students:
+            st = cs.student
+            records = {}
+            for sid in session_ids:
+                records[str(sid)] = att_map.get((st.id, sid), 'absent')
+            student_list.append({
+                'id': st.id,
+                'name': st.name,
+                'user_id': st.user_id,
+                'records': records
+            })
+
+        return Response({
+            'class_id': class_id,
+            'month': month,
+            'year': year,
+            'sessions': session_list,
+            'students': student_list,
+        }, status=status.HTTP_200_OK)
 
 
 class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
