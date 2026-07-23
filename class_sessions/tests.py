@@ -140,10 +140,16 @@ class AttendanceAutoGenerationTests(APITestCase):
         )
         self.student = Student.objects.create(name="Auto Student", check_in_token="auto_token_123")
         
-        from timetable.models import Class
+        from timetable.models import Class, TimetableSlot
         from people.models import Teacher, Subject
         self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='B')
         self.teacher = Teacher.objects.create(name="Mr. Smith")
+        self.subject = Subject.objects.create(name="Math")
+        
+        self.slot1 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=0, start_time="09:00", end_time="10:00")
+        self.slot2 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=0, start_time="08:30", end_time="09:30")
+        self.slot3 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=0, start_time="08:00", end_time="09:00")
+        self.slot4 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=1, start_time="09:00", end_time="10:00")
         
         # Create today's session
         today = timezone.localdate()
@@ -154,21 +160,21 @@ class AttendanceAutoGenerationTests(APITestCase):
         # Session 4: 08:30 - 09:30 (Student checks in at 09:10 -> > 15 mins after start, but before end -> late)
         
         self.session_present = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot1, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
         )
         self.att_present = SessionAttendance.objects.create(session=self.session_present, student=self.student, status='absent')
         
         self.session_late = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot2, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=8, minute=30))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=30)))
         )
         self.att_late = SessionAttendance.objects.create(session=self.session_late, student=self.student, status='absent')
         
         self.session_absent = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot3, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=8, minute=0))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0)))
         )
@@ -176,7 +182,7 @@ class AttendanceAutoGenerationTests(APITestCase):
         
         # Session with manual override
         self.session_override = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot4, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
         )
@@ -201,6 +207,9 @@ class AttendanceAutoGenerationTests(APITestCase):
         checkin.timestamp = timezone.make_aware(datetime.combine(checkin.date, datetime.min.time().replace(hour=9, minute=10)))
         checkin.save()
         
+        # Reset statuses to absent prior to reprocessing custom time
+        SessionAttendance.objects.filter(id__in=[self.att_present.id, self.att_late.id, self.att_absent.id]).update(status='absent')
+
         # Re-run the utility to process this exact time
         from class_sessions.utils import process_checkin_attendance
         process_checkin_attendance(checkin)

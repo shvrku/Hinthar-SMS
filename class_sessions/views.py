@@ -7,7 +7,8 @@ from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
-from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
+from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
+from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
 from django.utils import timezone
 from django.core.cache import cache
@@ -275,9 +276,9 @@ class AttendanceMatrixView(APIView):
         summary="Aggregated attendance matrix for a class",
         description="Returns combined sessions, enrolled students, and attendance matrix status map for a class in a month/year.",
         parameters=[
-            { 'name': 'class_id', 'type': 'integer', 'required': True, 'description': 'ID of the class' },
-            { 'name': 'month', 'type': 'integer', 'required': False, 'description': 'Month number (1-12). Defaults to current month.' },
-            { 'name': 'year', 'type': 'integer', 'required': False, 'description': '4-digit year. Defaults to current year.' },
+            OpenApiParameter('class_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=True, description='ID of the class'),
+            OpenApiParameter('month', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='Month number (1-12). Defaults to current month.'),
+            OpenApiParameter('year', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='4-digit year. Defaults to current year.'),
         ],
         responses={
             200: {
