@@ -1,6 +1,6 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from class_sessions.models import Session, SessionAttendance, CheckIn
+from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
 from timetable.serializers import TimetableSlotSerializer, ClassSerializer
 from people.serializers import TeacherSerializer, StudentSerializer, SubjectSerializer
 from people.models import Teacher, Student, Subject
@@ -14,13 +14,13 @@ class SessionSerializer(serializers.ModelSerializer):
     class_obj = ClassSerializer(read_only=True)
     
     teacher_id = serializers.PrimaryKeyRelatedField(
-        source='teacher', queryset=Teacher.objects.all(), write_only=True
+        source='teacher', queryset=Teacher.objects.all()
     )
     class_obj_id = serializers.PrimaryKeyRelatedField(
-        source='class_obj', queryset=Class.objects.all(), write_only=True
+        source='class_obj', queryset=Class.objects.all()
     )
     timetable_slot_id = serializers.PrimaryKeyRelatedField(
-        source='timetable_slot', queryset=TimetableSlot.objects.all(), write_only=True
+        source='timetable_slot', queryset=TimetableSlot.objects.all()
     )
     
     start_time = serializers.DateTimeField(format=DT_FORMAT, input_formats=['iso-8601', DT_FORMAT])
@@ -54,10 +54,10 @@ class SessionAttendanceSerializer(serializers.ModelSerializer):
     student = StudentSerializer(read_only=True)
     
     session_id = serializers.PrimaryKeyRelatedField(
-        source='session', queryset=Session.objects.all(), write_only=True
+        source='session', queryset=Session.objects.all()
     )
     student_id = serializers.PrimaryKeyRelatedField(
-        source='student', queryset=Student.objects.all(), write_only=True
+        source='student', queryset=Student.objects.all()
     )
     
     class Meta:
@@ -95,24 +95,27 @@ class SessionAttendanceListSerializer(serializers.ModelSerializer):
 
 
 class CheckInSerializer(serializers.ModelSerializer):
+    student = StudentSerializer(read_only=True)
+    student_id = serializers.PrimaryKeyRelatedField(
+        source='student', queryset=Student.objects.all(), write_only=False
+    )
     student_name = serializers.CharField(source='student.name', read_only=True)
 
     class Meta:
         model = CheckIn
-        fields = ['id', 'student', 'student_name', 'date', 'timestamp', 'check_in_type', 'checked_by']
+        fields = ['id', 'student', 'student_id', 'student_name', 'date', 'timestamp', 'check_in_type', 'checked_by']
         read_only_fields = ['date', 'timestamp', 'checked_by']
 
-from class_sessions.models import AdHocSession, AdHocSessionAttendance
 
 class AdHocSessionSerializer(serializers.ModelSerializer):
     teacher = TeacherSerializer(read_only=True)
     subject = SubjectSerializer(read_only=True)
     
     teacher_id = serializers.PrimaryKeyRelatedField(
-        source='teacher', queryset=Teacher.objects.all(), write_only=True
+        source='teacher', queryset=Teacher.objects.all()
     )
     subject_id = serializers.PrimaryKeyRelatedField(
-        source='subject', queryset=Subject.objects.all(), write_only=True
+        source='subject', queryset=Subject.objects.all()
     )
     
     start_time = serializers.TimeField()
@@ -148,13 +151,12 @@ class AdHocSessionAttendanceSerializer(serializers.ModelSerializer):
     student = StudentSerializer(read_only=True)
     
     ad_hoc_session_id = serializers.PrimaryKeyRelatedField(
-        source='ad_hoc_session', queryset=AdHocSession.objects.all(), write_only=True
+        source='ad_hoc_session', queryset=AdHocSession.objects.all()
     )
     student_id = serializers.PrimaryKeyRelatedField(
-        source='student', queryset=Student.objects.all(), write_only=True
+        source='student', queryset=Student.objects.all()
     )
     
     class Meta:
         model = AdHocSessionAttendance
         fields = ['id', 'ad_hoc_session', 'student', 'status', 'ad_hoc_session_id', 'student_id']
-
