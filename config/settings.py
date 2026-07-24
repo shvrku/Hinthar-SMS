@@ -156,8 +156,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'checkin': '10/minute',
     },
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 50,
+    'DEFAULT_PAGINATION_CLASS': None,
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 

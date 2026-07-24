@@ -38,7 +38,9 @@ class Session(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['teacher', 'start_time']),
+            models.Index(fields=['class_obj', 'start_time'], name='idx_session_class_start'),
+            models.Index(fields=['teacher', 'start_time'], name='idx_session_teacher_start'),
+            models.Index(fields=['status', 'paid'], name='idx_session_status_paid'),
             models.Index(fields=['start_time']),
             models.Index(fields=['status']),
             models.Index(fields=['paid']),
@@ -67,6 +69,7 @@ class SessionAttendance(models.Model):
             ),
         ]
         indexes = [
+            models.Index(fields=['session', 'student'], name='idx_attendance_sess_stud'),
             models.Index(fields=['student']),
             models.Index(fields=['session', 'status']),
         ]

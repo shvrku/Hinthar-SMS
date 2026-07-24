@@ -53,6 +53,9 @@ class ClassStudent(models.Model):
                 name='unique_student_per_class'
             ),
         ]
+        indexes = [
+            models.Index(fields=['class_obj', 'student'], name='idx_class_student_rel'),
+        ]
 
     def __str__(self):
         return f"{self.student.name} in {self.class_obj}"

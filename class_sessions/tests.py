@@ -140,10 +140,16 @@ class AttendanceAutoGenerationTests(APITestCase):
         )
         self.student = Student.objects.create(name="Auto Student", check_in_token="auto_token_123")
         
-        from timetable.models import Class
+        from timetable.models import Class, TimetableSlot
         from people.models import Teacher, Subject
         self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='B')
         self.teacher = Teacher.objects.create(name="Mr. Smith")
+        self.subject = Subject.objects.create(name="Math")
+        
+        self.slot1 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=0, start_time="09:00", end_time="10:00")
+        self.slot2 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=0, start_time="08:30", end_time="09:30")
+        self.slot3 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=0, start_time="08:00", end_time="09:00")
+        self.slot4 = TimetableSlot.objects.create(class_obj=self.class_obj, subject=self.subject, teacher=self.teacher, day_of_week=1, start_time="09:00", end_time="10:00")
         
         # Create today's session
         today = timezone.localdate()
@@ -154,21 +160,21 @@ class AttendanceAutoGenerationTests(APITestCase):
         # Session 4: 08:30 - 09:30 (Student checks in at 09:10 -> > 15 mins after start, but before end -> late)
         
         self.session_present = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot1, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
         )
         self.att_present = SessionAttendance.objects.create(session=self.session_present, student=self.student, status='absent')
         
         self.session_late = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot2, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=8, minute=30))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=30)))
         )
         self.att_late = SessionAttendance.objects.create(session=self.session_late, student=self.student, status='absent')
         
         self.session_absent = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot3, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=8, minute=0))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0)))
         )
@@ -176,7 +182,7 @@ class AttendanceAutoGenerationTests(APITestCase):
         
         # Session with manual override
         self.session_override = Session.objects.create(
-            teacher=self.teacher, class_obj=self.class_obj,
+            timetable_slot=self.slot4, teacher=self.teacher, class_obj=self.class_obj,
             start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
             end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
         )
@@ -201,6 +207,9 @@ class AttendanceAutoGenerationTests(APITestCase):
         checkin.timestamp = timezone.make_aware(datetime.combine(checkin.date, datetime.min.time().replace(hour=9, minute=10)))
         checkin.save()
         
+        # Reset statuses to absent prior to reprocessing custom time
+        SessionAttendance.objects.filter(id__in=[self.att_present.id, self.att_late.id, self.att_absent.id]).update(status='absent')
+
         # Re-run the utility to process this exact time
         from class_sessions.utils import process_checkin_attendance
         process_checkin_attendance(checkin)
@@ -217,4 +226,89 @@ class AttendanceAutoGenerationTests(APITestCase):
         
         self.att_override.refresh_from_db()
         self.assertEqual(self.att_override.status, 'late') # was manually marked late, should not change
+
+
+class AttendanceMatrixViewTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="test_matrix_user", role="admin", clerk_id="clerk_matrix_1")
+        from timetable.models import Class, ClassStudent, TimetableSlot
+        from people.models import Teacher, Subject
+        
+        self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='M')
+        self.teacher = Teacher.objects.create(name="Matrix Teacher")
+        self.subject = Subject.objects.create(name="Matrix Math")
+        self.student = Student.objects.create(name="Matrix Student", check_in_token="mat_tok_1")
+        
+        ClassStudent.objects.create(class_obj=self.class_obj, student=self.student)
+        
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj, subject=self.subject, teacher=self.teacher,
+            day_of_week=0, start_time="09:00", end_time="10:00"
+        )
+        
+        today = timezone.localdate()
+        self.session = Session.objects.create(
+            timetable_slot=self.slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10, minute=0)))
+        )
+        SessionAttendance.objects.create(session=self.session, student=self.student, status='present')
+
+    def test_matrix_endpoint_success(self):
+        self.client.force_authenticate(user=self.user)
+        today = timezone.localdate()
+        response = self.client.get(
+            f"/api/v1/attendance/matrix/?class_id={self.class_obj.id}&month={today.month}&year={today.year}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["class_id"], self.class_obj.id)
+        self.assertEqual(len(response.data["sessions"]), 1)
+        self.assertEqual(len(response.data["students"]), 1)
+        self.assertEqual(response.data["students"][0]["records"][str(self.session.id)], "present")
+
+    def test_matrix_endpoint_missing_class_id(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/v1/attendance/matrix/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_matrix_endpoint_class_not_found(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/v1/attendance/matrix/?class_id=9999")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SessionFilterTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="test_filter_user", role="admin", clerk_id="clerk_filt_1")
+        from timetable.models import Class, TimetableSlot
+        from people.models import Teacher, Subject
+        
+        self.class_obj = Class.objects.create(education_level='IG', cohort_identifier='F')
+        self.teacher = Teacher.objects.create(name="Filter Teacher")
+        self.subject = Subject.objects.create(name="Filter Physics")
+        
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj, subject=self.subject, teacher=self.teacher,
+            day_of_week=1, start_time="10:00", end_time="11:00"
+        )
+        
+        d1 = date(2026, 7, 10)
+        self.session1 = Session.objects.create(
+            timetable_slot=self.slot, teacher=self.teacher, class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(d1, datetime.min.time().replace(hour=10, minute=0))),
+            end_time=timezone.make_aware(datetime.combine(d1, datetime.min.time().replace(hour=11, minute=0)))
+        )
+
+    def test_session_list_extended_filters(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/v1/sessions/?class_id={self.class_obj.id}&start_date=2026-07-01&end_date=2026-07-31&month=7&year=2026&subject_id={self.subject.id}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
 

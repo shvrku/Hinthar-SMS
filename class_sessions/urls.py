@@ -15,6 +15,8 @@ urlpatterns = [
     path('check-ins/qr/', views.QRCheckInView.as_view(), name='checkin-qr'),
     path('check-ins/manual/', views.ManualCheckInView.as_view(), name='checkin-manual'),
     path('sessions/generate/<int:class_id>/', views.GenerateClassSessionsView.as_view(), name='generate-class-sessions'),
+    path('attendance/matrix/', views.AttendanceMatrixView.as_view(), name='attendance-matrix'),
+    path('adhoc-attendance/matrix/', views.AdHocAttendanceMatrixView.as_view(), name='adhoc-attendance-matrix'),
     # Router (catches check-ins/ list detail routes)
     path('', include(router.urls)),
 ]
