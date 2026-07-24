@@ -19,7 +19,7 @@ from class_sessions.serializers import (
     AdHocSessionSerializer, AdHocSessionAttendanceSerializer
 )
 from class_sessions.utils import process_checkin_attendance
-from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove
+from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove, IsStaffOrAdminOrReadOnlyAuthenticated, IsAdminOrReadOnlyAuthenticated
 from people.models import Student, User, Teacher, Staff, Subject
 from people.views import BulkOperationsMixin
 from timetable.models import TimetableSlot, ClassStudent, Class
@@ -161,7 +161,7 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         return qs
     
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete', 'bulk_upsert']:
             return [(IsAdmin | IsOwnerTeacher)()]
         return [IsAuthenticated()]
 
@@ -169,6 +169,65 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         if self.action == 'list':
             return SessionAttendanceListSerializer
         return SessionAttendanceSerializer
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAdmin | IsOwnerTeacher])
+    def bulk_upsert(self, request):
+        records = request.data.get('records', request.data)
+        if not isinstance(records, list):
+            return Response({'error': 'Expected a list of attendance records'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        session_ids = set()
+        student_ids = set()
+        for r in records:
+            s_id = r.get('session_id') or r.get('session')
+            st_id = r.get('student_id') or r.get('student')
+            if s_id: session_ids.add(int(s_id))
+            if st_id: student_ids.add(int(st_id))
+            
+        existing = {
+            (a.session_id, a.student_id): a
+            for a in SessionAttendance.objects.filter(session_id__in=session_ids, student_id__in=student_ids)
+        }
+        
+        to_create = []
+        to_update = []
+        
+        with transaction.atomic():
+            for r in records:
+                s_id = r.get('session_id') or r.get('session')
+                st_id = r.get('student_id') or r.get('student')
+                if not s_id or not st_id:
+                    continue
+                s_id = int(s_id)
+                st_id = int(st_id)
+                status_val = r.get('status', 'present')
+                remarks_val = r.get('remarks', None)
+                
+                key = (s_id, st_id)
+                if key in existing:
+                    obj = existing[key]
+                    obj.status = status_val
+                    if remarks_val is not None:
+                        obj.remarks = remarks_val
+                    to_update.append(obj)
+                else:
+                    obj = SessionAttendance(
+                        session_id=s_id,
+                        student_id=st_id,
+                        status=status_val,
+                        remarks=remarks_val
+                    )
+                    to_create.append(obj)
+            
+            if to_create:
+                SessionAttendance.objects.bulk_create(to_create)
+            if to_update:
+                SessionAttendance.objects.bulk_update(to_update, ['status', 'remarks'])
+                
+        return Response({
+            'created_count': len(to_create),
+            'updated_count': len(to_update)
+        }, status=status.HTTP_200_OK)
 
 
 class GenerateClassSessionsView(APIView):
@@ -270,64 +329,111 @@ class GenerateClassSessionsView(APIView):
 
 
 class AttendanceMatrixView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
 
     @extend_schema(
-        summary="Aggregated attendance matrix for a class",
-        description="Returns combined sessions, enrolled students, and attendance matrix status map for a class in a month/year.",
+        summary="Aggregated attendance matrix for classes",
+        description="Returns combined sessions, students, and attendance records for classes filtered by class, subject, teacher, date range, or month/year.",
         parameters=[
-            OpenApiParameter('class_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=True, description='ID of the class'),
-            OpenApiParameter('month', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='Month number (1-12). Defaults to current month.'),
-            OpenApiParameter('year', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='4-digit year. Defaults to current year.'),
+            OpenApiParameter('class_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='ID of the class or "all"'),
+            OpenApiParameter('subject_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Subject ID filter'),
+            OpenApiParameter('teacher_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Teacher ID filter'),
+            OpenApiParameter('date_from', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False, description='Start date (YYYY-MM-DD)'),
+            OpenApiParameter('date_to', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False, description='End date (YYYY-MM-DD)'),
+            OpenApiParameter('month', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='Month number (1-12)'),
+            OpenApiParameter('year', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='4-digit year'),
         ],
         responses={
-            200: {
-                'type': 'object',
-                'properties': {
-                    'class_id': {'type': 'integer'},
-                    'month': {'type': 'integer'},
-                    'year': {'type': 'integer'},
-                    'sessions': {'type': 'array', 'items': {'type': 'object'}},
-                    'students': {'type': 'array', 'items': {'type': 'object'}},
-                }
-            },
-            400: OpenApiResponse(description="Bad Request - Missing or invalid parameters"),
-            404: OpenApiResponse(description="Class Not Found"),
+            200: OpenApiResponse(description="Success"),
+            400: OpenApiResponse(description="Bad Request"),
         }
     )
     def get(self, request):
         class_id_raw = request.query_params.get('class_id')
-        if not class_id_raw:
-            return Response({'error': 'class_id query parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            class_id = int(class_id_raw)
-        except ValueError:
-            return Response({'error': 'class_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            class_obj = Class.objects.get(pk=class_id)
-        except Class.DoesNotExist:
-            return Response({'error': f'Class with id {class_id} not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        now = timezone.localdate()
+        subject_id_raw = request.query_params.get('subject_id')
+        teacher_id_raw = request.query_params.get('teacher_id')
+        date_from_raw = request.query_params.get('date_from') or request.query_params.get('start_date')
+        date_to_raw = request.query_params.get('date_to') or request.query_params.get('end_date')
         month_raw = request.query_params.get('month')
         year_raw = request.query_params.get('year')
 
-        try:
-            month = int(month_raw) if month_raw else now.month
-            year = int(year_raw) if year_raw else now.year
-            if not (1 <= month <= 12):
-                raise ValueError("Month out of range")
-        except ValueError:
-            return Response({'error': 'Invalid month or year parameter'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 1. Fetch sessions for the given class, month, and year
-        sessions = Session.objects.select_related('timetable_slot__subject', 'teacher__user').filter(
-            class_obj_id=class_id,
-            start_time__year=year,
-            start_time__month=month
+        now = timezone.localdate()
+        sessions_qs = Session.objects.select_related(
+            'timetable_slot__subject', 'teacher__user', 'class_obj'
         ).order_by('start_time')
+
+        if class_id_raw and class_id_raw != 'all' and class_id_raw != 'adhoc':
+            try:
+                sessions_qs = sessions_qs.filter(class_obj_id=int(class_id_raw))
+            except ValueError:
+                return Response({'error': 'class_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if subject_id_raw and subject_id_raw != 'all':
+            try:
+                sessions_qs = sessions_qs.filter(timetable_slot__subject_id=int(subject_id_raw))
+            except ValueError:
+                pass
+
+        if teacher_id_raw and teacher_id_raw != 'all':
+            try:
+                sessions_qs = sessions_qs.filter(teacher_id=int(teacher_id_raw))
+            except ValueError:
+                pass
+
+        if date_from_raw:
+            sessions_qs = sessions_qs.filter(start_time__date__gte=date_from_raw)
+        if date_to_raw:
+            sessions_qs = sessions_qs.filter(start_time__date__lte=date_to_raw)
+
+        if not date_from_raw and not date_to_raw:
+            try:
+                m = int(month_raw) if month_raw else now.month
+                y = int(year_raw) if year_raw else now.year
+                sessions_qs = sessions_qs.filter(start_time__year=y, start_time__month=m)
+            except ValueError:
+                pass
+
+        sessions = list(sessions_qs)
+        session_ids = [s.id for s in sessions]
+
+        # Determine target student list
+        if class_id_raw and class_id_raw != 'all' and class_id_raw != 'adhoc':
+            class_students = ClassStudent.objects.select_related('student').filter(
+                class_obj_id=int(class_id_raw)
+            ).order_by('student__name')
+            students = [cs.student for cs in class_students]
+        else:
+            session_class_ids = set(s.class_obj_id for s in sessions if s.class_obj_id)
+            if session_class_ids:
+                class_students = ClassStudent.objects.select_related('student').filter(
+                    class_obj_id__in=session_class_ids
+                ).order_by('student__name')
+                student_map = {cs.student_id: cs.student for cs in class_students}
+                students = list(student_map.values())
+            else:
+                students = list(Student.objects.all().order_by('name'))
+
+        student_ids = [st.id for st in students]
+
+        # Batch query attendance records
+        attendances = SessionAttendance.objects.filter(
+            session_id__in=session_ids,
+            student_id__in=student_ids
+        ).values('id', 'session_id', 'student_id', 'status')
+
+        att_map = {(a['student_id'], a['session_id']): a['status'] for a in attendances}
+
+        student_list = []
+        for st in students:
+            records = {}
+            for sid in session_ids:
+                records[str(sid)] = att_map.get((st.id, sid), 'absent')
+            student_list.append({
+                'id': st.id,
+                'name': st.name,
+                'user_id': getattr(st, 'user_id', None),
+                'records': records
+            })
 
         session_list = [
             {
@@ -337,48 +443,121 @@ class AttendanceMatrixView(APIView):
                 'subject': s.timetable_slot.subject.name if s.timetable_slot and s.timetable_slot.subject else None,
                 'subject_id': s.timetable_slot.subject_id if s.timetable_slot else None,
                 'teacher_id': s.teacher_id,
-                'teacher_name': s.teacher.name,
+                'teacher_name': s.teacher.name if s.teacher else None,
+                'class_obj_id': s.class_obj_id,
+                'class_name': str(s.class_obj) if s.class_obj else None,
                 'status': s.status,
                 'paid': s.paid,
             }
             for s in sessions
         ]
 
-        # 2. Fetch students enrolled in this class
-        class_students = ClassStudent.objects.select_related('student').filter(
-            class_obj_id=class_id
-        ).order_by('student__name')
+        return Response({
+            'class_id': class_id_raw,
+            'sessions': session_list,
+            'students': student_list,
+            'attendances': list(attendances),
+        }, status=status.HTTP_200_OK)
 
+
+class AdHocAttendanceMatrixView(APIView):
+    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+
+    @extend_schema(
+        summary="Aggregated attendance matrix for ad-hoc sessions",
+        description="Returns ad-hoc sessions, students, and attendance status map.",
+        parameters=[
+            OpenApiParameter('subject_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Subject ID filter'),
+            OpenApiParameter('teacher_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Teacher ID filter'),
+            OpenApiParameter('date_from', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False, description='Start date (YYYY-MM-DD)'),
+            OpenApiParameter('date_to', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False, description='End date (YYYY-MM-DD)'),
+            OpenApiParameter('month', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='Month number (1-12)'),
+            OpenApiParameter('year', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='4-digit year'),
+        ],
+        responses={
+            200: OpenApiResponse(description="Success"),
+            400: OpenApiResponse(description="Bad Request"),
+        }
+    )
+    def get(self, request):
+        subject_id_raw = request.query_params.get('subject_id')
+        teacher_id_raw = request.query_params.get('teacher_id')
+        date_from_raw = request.query_params.get('date_from') or request.query_params.get('start_date')
+        date_to_raw = request.query_params.get('date_to') or request.query_params.get('end_date')
+        month_raw = request.query_params.get('month')
+        year_raw = request.query_params.get('year')
+
+        now = timezone.localdate()
+        sessions_qs = AdHocSession.objects.select_related('subject', 'teacher__user').order_by('date', 'start_time')
+
+        if subject_id_raw and subject_id_raw != 'all':
+            try:
+                sessions_qs = sessions_qs.filter(subject_id=int(subject_id_raw))
+            except ValueError:
+                pass
+
+        if teacher_id_raw and teacher_id_raw != 'all':
+            try:
+                sessions_qs = sessions_qs.filter(teacher_id=int(teacher_id_raw))
+            except ValueError:
+                pass
+
+        if date_from_raw:
+            sessions_qs = sessions_qs.filter(date__gte=date_from_raw)
+        if date_to_raw:
+            sessions_qs = sessions_qs.filter(date__lte=date_to_raw)
+
+        if not date_from_raw and not date_to_raw:
+            try:
+                m = int(month_raw) if month_raw else now.month
+                y = int(year_raw) if year_raw else now.year
+                sessions_qs = sessions_qs.filter(date__year=y, date__month=m)
+            except ValueError:
+                pass
+
+        sessions = list(sessions_qs)
         session_ids = [s.id for s in sessions]
-        student_ids = [cs.student_id for cs in class_students]
 
-        # 3. Batch query attendance records in a single query pass
-        attendances = SessionAttendance.objects.filter(
-            session_id__in=session_ids,
-            student_id__in=student_ids
-        ).values('session_id', 'student_id', 'status')
+        # Batch query attendance records
+        attendances = AdHocSessionAttendance.objects.filter(
+            ad_hoc_session_id__in=session_ids
+        ).values('id', 'ad_hoc_session_id', 'student_id', 'status')
 
-        att_map = {(a['student_id'], a['session_id']): a['status'] for a in attendances}
+        student_ids_in_att = set(a['student_id'] for a in attendances)
+        if student_ids_in_att:
+            students = list(Student.objects.filter(pk__in=student_ids_in_att).order_by('name'))
+        else:
+            students = list(Student.objects.all().order_by('name'))
 
-        student_list = []
-        for cs in class_students:
-            st = cs.student
-            records = {}
-            for sid in session_ids:
-                records[str(sid)] = att_map.get((st.id, sid), 'absent')
-            student_list.append({
+        session_list = [
+            {
+                'id': s.id,
+                'date': s.date.isoformat(),
+                'start_time': str(s.start_time),
+                'end_time': str(s.end_time),
+                'subject': s.subject.name if s.subject else None,
+                'subject_id': s.subject_id,
+                'teacher_id': s.teacher_id,
+                'teacher_name': s.teacher.name if s.teacher else None,
+                'status': s.status,
+                'paid': s.paid,
+            }
+            for s in sessions
+        ]
+
+        student_list = [
+            {
                 'id': st.id,
                 'name': st.name,
                 'user_id': st.user_id,
-                'records': records
-            })
+            }
+            for st in students
+        ]
 
         return Response({
-            'class_id': class_id,
-            'month': month,
-            'year': year,
             'sessions': session_list,
             'students': student_list,
+            'attendances': list(attendances),
         }, status=status.HTTP_200_OK)
 
 
@@ -717,6 +896,68 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete', 'bulk_upsert']:
             return [(IsAdmin | IsOwnerTeacher)()]
         return [IsAuthenticated()]
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAdmin | IsOwnerTeacher])
+    def bulk_upsert(self, request):
+        records = request.data.get('records', request.data)
+        if not isinstance(records, list):
+            return Response({'error': 'Expected a list of adhoc attendance records'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        session_ids = set()
+        student_ids = set()
+        for r in records:
+            s_id = r.get('ad_hoc_session_id') or r.get('adhoc_session_id') or r.get('ad_hoc_session') or r.get('adhoc_session')
+            st_id = r.get('student_id') or r.get('student')
+            if s_id: session_ids.add(int(s_id))
+            if st_id: student_ids.add(int(st_id))
+            
+        existing = {
+            (a.ad_hoc_session_id, a.student_id): a
+            for a in AdHocSessionAttendance.objects.filter(ad_hoc_session_id__in=session_ids, student_id__in=student_ids)
+        }
+        
+        to_create = []
+        to_update = []
+        
+        with transaction.atomic():
+            for r in records:
+                s_id = r.get('ad_hoc_session_id') or r.get('adhoc_session_id') or r.get('ad_hoc_session') or r.get('adhoc_session')
+                st_id = r.get('student_id') or r.get('student')
+                if not s_id or not st_id:
+                    continue
+                s_id = int(s_id)
+                st_id = int(st_id)
+                status_val = r.get('status', 'present')
+                attended_val = r.get('attended', status_val in ['present', 'late'])
+                remarks_val = r.get('remarks', None)
+                
+                key = (s_id, st_id)
+                if key in existing:
+                    obj = existing[key]
+                    obj.status = status_val
+                    obj.attended = attended_val
+                    if remarks_val is not None:
+                        obj.remarks = remarks_val
+                    to_update.append(obj)
+                else:
+                    obj = AdHocSessionAttendance(
+                        ad_hoc_session_id=s_id,
+                        student_id=st_id,
+                        status=status_val,
+                        attended=attended_val,
+                        remarks=remarks_val
+                    )
+                    to_create.append(obj)
+                    
+            if to_create:
+                AdHocSessionAttendance.objects.bulk_create(to_create)
+            if to_update:
+                AdHocSessionAttendance.objects.bulk_update(to_update, ['status', 'attended', 'remarks'])
+                
+        return Response({
+            'created_count': len(to_create),
+            'updated_count': len(to_update)
+        }, status=status.HTTP_200_OK)
