@@ -84,3 +84,88 @@ class StudentSerializerTest(TestCase):
         request.user = self.teacher_user
         serializer = self.serializer_class(self.student, context={'request': request})
         self.assertNotIn('check_in_token', serializer.data)
+
+
+from people.models import Teacher, Staff
+from django.utils import timezone
+
+class UniqueCodeTest(TestCase):
+    def test_student_unique_code_format(self):
+        student = Student.objects.create(name="Alice")
+        year_str = f"{timezone.now().year % 100:02d}"
+        self.assertEqual(student.unique_code, f"HIS{year_str}-00001")
+
+    def test_teacher_unique_code_format(self):
+        teacher = Teacher.objects.create(name="Bob")
+        year_str = f"{timezone.now().year % 100:02d}"
+        self.assertEqual(teacher.unique_code, f"HIST{year_str}-00001")
+
+    def test_staff_unique_code_format(self):
+        staff = Staff.objects.create(name="Charlie")
+        year_str = f"{timezone.now().year % 100:02d}"
+        self.assertEqual(staff.unique_code, f"HISS{year_str}-00001")
+
+    def test_sequential_numbers_in_same_year(self):
+        s1 = Student.objects.create(name="Student 1")
+        s2 = Student.objects.create(name="Student 2")
+        year_str = f"{timezone.now().year % 100:02d}"
+        self.assertEqual(s1.unique_code, f"HIS{year_str}-00001")
+        self.assertEqual(s2.unique_code, f"HIS{year_str}-00002")
+
+    def test_custom_school_code(self):
+        student = Student.objects.create(name="David", school_code="SPD")
+        year_str = f"{timezone.now().year % 100:02d}"
+        self.assertEqual(student.unique_code, f"SPD{year_str}-00001")
+
+    def test_unique_code_not_overwritten_on_save(self):
+        student = Student.objects.create(name="Eve")
+        code = student.unique_code
+        student.name = "Eve Updated"
+        student.save()
+        self.assertEqual(student.unique_code, code)
+
+    def test_gap_deletion_does_not_reuse_sequence(self):
+        s1 = Student.objects.create(name="S1")
+        s2 = Student.objects.create(name="S2")
+        year_str = f"{timezone.now().year % 100:02d}"
+        self.assertEqual(s1.unique_code, f"HIS{year_str}-00001")
+        self.assertEqual(s2.unique_code, f"HIS{year_str}-00002")
+        s1.delete()
+        s3 = Student.objects.create(name="S3")
+        self.assertEqual(s3.unique_code, f"HIS{year_str}-00003")
+
+    def test_exam_candidate_number_optional(self):
+        s = Student.objects.create(name="Frank")
+        self.assertIsNone(s.exam_candidate_number)
+        s.exam_candidate_number = "EXAM-2026-99"
+        s.save()
+        self.assertEqual(s.exam_candidate_number, "EXAM-2026-99")
+
+
+from people.serializers import StudentSerializer, TeacherSerializer, StaffSerializer
+
+class SchoolCodeValidationTest(TestCase):
+    def test_valid_school_codes_pass_validation(self):
+        for code in ['HIS', 'SPD', 'SPN', 'YWM']:
+            serializer = StudentSerializer(data={'name': 'Test', 'school_code': code})
+            self.assertTrue(serializer.is_valid(), f"Failed for code: {code}")
+
+    def test_invalid_school_code_fails_validation(self):
+        serializer = StudentSerializer(data={'name': 'Test', 'school_code': 'INVALID'})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('school_code', serializer.errors)
+
+    def test_missing_school_code_fails_validation(self):
+        serializer = StudentSerializer(data={'name': 'Test'})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('school_code', serializer.errors)
+
+    def test_teacher_school_code_required(self):
+        serializer = TeacherSerializer(data={'name': 'Teacher Test', 'school_code': 'SPD'})
+        self.assertTrue(serializer.is_valid())
+
+    def test_staff_school_code_required(self):
+        serializer = StaffSerializer(data={'name': 'Staff Test', 'school_code': 'YWM'})
+        self.assertTrue(serializer.is_valid())
+
+

@@ -24,26 +24,29 @@ class SubjectAdmin(admin.ModelAdmin):
 
 @admin.register(Teacher)
 class TeacherAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'employment_type', 'default_rate', 'user')
-    list_filter = ('employment_type',)
-    search_fields = ('name', 'contact')
+    list_display = ('id', 'unique_code', 'name', 'employment_type', 'default_rate', 'join_date', 'school_code', 'user')
+    list_filter = ('employment_type', 'school_code')
+    search_fields = ('unique_code', 'name', 'contact')
     raw_id_fields = ('user',)
+    readonly_fields = ('unique_code',)
 
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'dob', 'enrollment_date', 'user', 'check_in_token')
-    list_filter = ('enrollment_date',)
-    search_fields = ('name', 'contact', 'check_in_token')
+    list_display = ('id', 'unique_code', 'exam_candidate_number', 'name', 'dob', 'enrollment_date', 'school_code', 'user', 'check_in_token')
+    list_filter = ('enrollment_date', 'school_code')
+    search_fields = ('unique_code', 'exam_candidate_number', 'name', 'contact', 'check_in_token')
     raw_id_fields = ('user',)
-    readonly_fields = ('check_in_token',)
+    readonly_fields = ('unique_code', 'check_in_token')
 
 
 @admin.register(Staff)
 class StaffAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'user')
-    search_fields = ('name', 'contact')
+    list_display = ('id', 'unique_code', 'name', 'join_date', 'school_code', 'user')
+    list_filter = ('school_code',)
+    search_fields = ('unique_code', 'name', 'contact')
     raw_id_fields = ('user',)
+    readonly_fields = ('unique_code',)
 
 
 @admin.register(AuditLog)
