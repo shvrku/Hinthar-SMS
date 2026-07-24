@@ -201,28 +201,24 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
                 s_id = int(s_id)
                 st_id = int(st_id)
                 status_val = r.get('status', 'present')
-                remarks_val = r.get('remarks', None)
                 
                 key = (s_id, st_id)
                 if key in existing:
                     obj = existing[key]
                     obj.status = status_val
-                    if remarks_val is not None:
-                        obj.remarks = remarks_val
                     to_update.append(obj)
                 else:
                     obj = SessionAttendance(
                         session_id=s_id,
                         student_id=st_id,
-                        status=status_val,
-                        remarks=remarks_val
+                        status=status_val
                     )
                     to_create.append(obj)
             
             if to_create:
                 SessionAttendance.objects.bulk_create(to_create)
             if to_update:
-                SessionAttendance.objects.bulk_update(to_update, ['status', 'remarks'])
+                SessionAttendance.objects.bulk_update(to_update, ['status'])
                 
         return Response({
             'created_count': len(to_create),
@@ -357,28 +353,25 @@ class AttendanceMatrixView(APIView):
         month_raw = request.query_params.get('month')
         year_raw = request.query_params.get('year')
 
+        if not class_id_raw or class_id_raw == 'all' or class_id_raw == 'adhoc':
+            return Response({
+                'class_id': class_id_raw,
+                'sessions': [],
+                'students': [],
+                'attendances': [],
+            }, status=status.HTTP_200_OK)
+
+        try:
+            class_id_int = int(class_id_raw)
+        except ValueError:
+            return Response({'error': 'class_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
         now = timezone.localdate()
-        sessions_qs = Session.objects.select_related(
+        sessions_qs = Session.objects.filter(
+            class_obj_id=class_id_int
+        ).select_related(
             'timetable_slot__subject', 'teacher__user', 'class_obj'
         ).order_by('start_time')
-
-        if class_id_raw and class_id_raw != 'all' and class_id_raw != 'adhoc':
-            try:
-                sessions_qs = sessions_qs.filter(class_obj_id=int(class_id_raw))
-            except ValueError:
-                return Response({'error': 'class_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if subject_id_raw and subject_id_raw != 'all':
-            try:
-                sessions_qs = sessions_qs.filter(timetable_slot__subject_id=int(subject_id_raw))
-            except ValueError:
-                pass
-
-        if teacher_id_raw and teacher_id_raw != 'all':
-            try:
-                sessions_qs = sessions_qs.filter(teacher_id=int(teacher_id_raw))
-            except ValueError:
-                pass
 
         if date_from_raw:
             sessions_qs = sessions_qs.filter(start_time__date__gte=date_from_raw)
@@ -396,23 +389,11 @@ class AttendanceMatrixView(APIView):
         sessions = list(sessions_qs)
         session_ids = [s.id for s in sessions]
 
-        # Determine target student list
-        if class_id_raw and class_id_raw != 'all' and class_id_raw != 'adhoc':
-            class_students = ClassStudent.objects.select_related('student').filter(
-                class_obj_id=int(class_id_raw)
-            ).order_by('student__name')
-            students = [cs.student for cs in class_students]
-        else:
-            session_class_ids = set(s.class_obj_id for s in sessions if s.class_obj_id)
-            if session_class_ids:
-                class_students = ClassStudent.objects.select_related('student').filter(
-                    class_obj_id__in=session_class_ids
-                ).order_by('student__name')
-                student_map = {cs.student_id: cs.student for cs in class_students}
-                students = list(student_map.values())
-            else:
-                students = list(Student.objects.all().order_by('name'))
-
+        # Enrolled students for this class ONLY
+        class_students = ClassStudent.objects.select_related('student').filter(
+            class_obj_id=class_id_int
+        ).order_by('student__name')
+        students = [cs.student for cs in class_students]
         student_ids = [st.id for st in students]
 
         # Batch query attendance records
@@ -931,31 +912,24 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
                 s_id = int(s_id)
                 st_id = int(st_id)
                 status_val = r.get('status', 'present')
-                attended_val = r.get('attended', status_val in ['present', 'late'])
-                remarks_val = r.get('remarks', None)
                 
                 key = (s_id, st_id)
                 if key in existing:
                     obj = existing[key]
                     obj.status = status_val
-                    obj.attended = attended_val
-                    if remarks_val is not None:
-                        obj.remarks = remarks_val
                     to_update.append(obj)
                 else:
                     obj = AdHocSessionAttendance(
                         ad_hoc_session_id=s_id,
                         student_id=st_id,
-                        status=status_val,
-                        attended=attended_val,
-                        remarks=remarks_val
+                        status=status_val
                     )
                     to_create.append(obj)
                     
             if to_create:
                 AdHocSessionAttendance.objects.bulk_create(to_create)
             if to_update:
-                AdHocSessionAttendance.objects.bulk_update(to_update, ['status', 'attended', 'remarks'])
+                AdHocSessionAttendance.objects.bulk_update(to_update, ['status'])
                 
         return Response({
             'created_count': len(to_create),
