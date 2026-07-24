@@ -88,12 +88,30 @@ class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
     ordering = ['id']
 
+    @extend_schema(
+        request=TeacherSerializer(many=True),
+        responses={201: TeacherSerializer(many=True)},
+        summary="Bulk create teachers",
+    )
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        return super().bulk_create(request)
+
 
 class StudentViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Student.objects.select_related('user').order_by('id')
     serializer_class = StudentSerializer
     permission_classes = [IsAdminOrReadOnlyAuthenticated]
     ordering = ['id']
+
+    @extend_schema(
+        request=StudentSerializer(many=True),
+        responses={201: StudentSerializer(many=True)},
+        summary="Bulk create students",
+    )
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        return super().bulk_create(request)
 
     @action(detail=True, methods=['get'],
             permission_classes=[IsStudentOwnerOrStaffOrAdmin])
