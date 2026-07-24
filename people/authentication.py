@@ -100,18 +100,21 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
             if not public_key:
                 raise exceptions.AuthenticationFailed("Matching public key not found in JWKS.")
 
-            # 4. Decode and verify the JWT
+            # 4. Decode and verify the JWT (leeway=60 handles clock skew between Clerk servers and local machine)
             audience = getattr(settings, 'CLERK_JWT_AUDIENCE', '')
             payload = jwt.decode(
                 token,
                 public_key,
                 algorithms=['RS256'],
                 audience=audience or None,
-                options={"verify_aud": bool(audience)}
+                options={"verify_aud": bool(audience)},
+                leeway=60
             )
 
         except jwt.ExpiredSignatureError:
             raise exceptions.AuthenticationFailed("Token has expired.")
+        except jwt.ImmatureSignatureError:
+            raise exceptions.AuthenticationFailed("Token is not yet valid (clock skew).")
         except jwt.InvalidSignatureError:
             raise exceptions.AuthenticationFailed("Token signature is invalid.")
         except jwt.DecodeError:
