@@ -19,11 +19,21 @@ class User(AbstractUser):
         return f"{self.username} ({self.role})"
 
 
+from django.utils import timezone
+
 class Subject(models.Model):
     name = models.CharField(max_length=255, unique=True)
 
     def __str__(self):
         return self.name
+
+
+SCHOOL_CHOICES = [
+    ('HIS', 'HIS'),
+    ('SPD', 'SPD'),
+    ('SPN', 'SPN'),
+    ('YWM', 'YWM'),
+]
 
 
 class Teacher(models.Model):
@@ -37,6 +47,9 @@ class Teacher(models.Model):
     default_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     contact = models.CharField(max_length=500, blank=True, null=True)
     bank_details = models.TextField(blank=True, null=True)
+    join_date = models.DateField(default=timezone.now)
+    school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
+    unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)
     # Link to user account (optional, teacher can exist without login)
     user = models.OneToOneField(
         User,
@@ -45,6 +58,12 @@ class Teacher(models.Model):
         blank=True,
         related_name='teacher_profile'
     )
+
+    def save(self, *args, **kwargs):
+        if not self.unique_code:
+            from people.utils import generate_unique_code
+            self.unique_code = generate_unique_code(self)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} ({self.get_employment_type_display()})"
@@ -56,6 +75,9 @@ class Student(models.Model):
     enrollment_date = models.DateField(auto_now_add=True)
     contact = models.CharField(max_length=500, blank=True, null=True)
     check_in_token = models.CharField(max_length=64, unique=True, blank=True, editable=False)
+    school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
+    unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)
+    exam_candidate_number = models.CharField(max_length=50, null=True, blank=True, unique=True, db_index=True)
     # Link to user account (optional, student can exist without login)
     user = models.OneToOneField(
         User,
@@ -68,6 +90,9 @@ class Student(models.Model):
     def save(self, *args, **kwargs):
         if not self.check_in_token:
             self.check_in_token = secrets.token_urlsafe(32)
+        if not self.unique_code:
+            from people.utils import generate_unique_code
+            self.unique_code = generate_unique_code(self)
         super().save(*args, **kwargs)
 
     def regenerate_check_in_token(self):
@@ -81,6 +106,9 @@ class Student(models.Model):
 class Staff(models.Model):
     name = models.CharField(max_length=255)
     contact = models.CharField(max_length=500, blank=True, null=True)
+    join_date = models.DateField(default=timezone.now)
+    school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
+    unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)
     # Link to user account (optional, staff can exist without login)
     user = models.OneToOneField(
         User,
@@ -89,6 +117,12 @@ class Staff(models.Model):
         blank=True,
         related_name='staff_profile'
     )
+
+    def save(self, *args, **kwargs):
+        if not self.unique_code:
+            from people.utils import generate_unique_code
+            self.unique_code = generate_unique_code(self)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name

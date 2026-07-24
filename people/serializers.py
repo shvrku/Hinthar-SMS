@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from people.models import Subject, Teacher, Student, Staff, AuditLog
+from people.models import Subject, Teacher, Student, Staff, AuditLog, SCHOOL_CHOICES
 
 User = get_user_model()
 
@@ -37,18 +37,21 @@ class SubjectSerializer(serializers.ModelSerializer):
 
 class TeacherSerializer(serializers.ModelSerializer):
     user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')
+    school_code = serializers.ChoiceField(choices=SCHOOL_CHOICES, required=True)
     
     class Meta:
         model = Teacher
-        fields = ['id', 'name', 'employment_type', 'default_rate', 'contact', 'bank_details', 'user_id']
+        fields = ['id', 'unique_code', 'name', 'employment_type', 'default_rate', 'contact', 'bank_details', 'join_date', 'school_code', 'user_id']
+        read_only_fields = ['unique_code']
 
 class StudentSerializer(serializers.ModelSerializer):
     user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')
+    school_code = serializers.ChoiceField(choices=SCHOOL_CHOICES, required=True)
     
     class Meta:
         model = Student
-        fields = ['id', 'name', 'dob', 'enrollment_date', 'contact', 'user_id', 'check_in_token']
-        read_only_fields = ['check_in_token']
+        fields = ['id', 'unique_code', 'exam_candidate_number', 'name', 'dob', 'enrollment_date', 'contact', 'school_code', 'user_id', 'check_in_token']
+        read_only_fields = ['unique_code', 'check_in_token']
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -65,10 +68,12 @@ class StudentSerializer(serializers.ModelSerializer):
 
 class StaffSerializer(serializers.ModelSerializer):
     user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')
+    school_code = serializers.ChoiceField(choices=SCHOOL_CHOICES, required=True)
     
     class Meta:
         model = Staff
-        fields = ['id', 'name', 'contact', 'user_id']
+        fields = ['id', 'unique_code', 'name', 'contact', 'join_date', 'school_code', 'user_id']
+        read_only_fields = ['unique_code']
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
