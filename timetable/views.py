@@ -56,10 +56,12 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
         )
         if exclude_pk:
             teacher_overlap = teacher_overlap.exclude(pk=exclude_pk)
-        if teacher_overlap.exists():
+        conflicting = teacher_overlap.select_related('class_obj').first()
+        if conflicting:
             day_name = TimetableSlot(day_of_week=day).get_day_of_week_display()
+            class_name = str(conflicting.class_obj) if conflicting.class_obj else 'Unknown'
             raise ValidationError(
-                f"Teacher '{teacher.name}' already has a slot overlapping this time on {day_name}."
+                f"Teacher '{teacher.name}' already has a slot in class '{class_name}' overlapping this time on {day_name}."
             )
 
         if room:
