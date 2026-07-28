@@ -264,11 +264,15 @@ class Command(BaseCommand):
 
         # ── 2. Teachers ──
         self.stdout.write('\n--- Creating Teachers ---')
-        teacher_bulk = [
+        from people.utils import generate_unique_code
+        teacher_objs = [
             Teacher(name=t[0], employment_type=t[1], default_rate=t[2])
             for t in TEACHERS
         ]
-        Teacher.objects.bulk_create(teacher_bulk)
+        for t in teacher_objs:
+            if not t.unique_code:
+                t.unique_code = generate_unique_code(t)
+        Teacher.objects.bulk_create(teacher_objs)
         teacher_objs = list(Teacher.objects.all())
         self.stdout.write(f'  Created {len(teacher_objs)} Teachers')
 
@@ -303,6 +307,7 @@ class Command(BaseCommand):
                 name=name, dob=dob,
                 check_in_token=secrets.token_urlsafe(32),
             )
+            student.unique_code = generate_unique_code(student)
             student_objs.append(student)
 
         Student.objects.bulk_create(student_objs)
@@ -447,13 +452,22 @@ class Command(BaseCommand):
         # ── 7. CheckIns ──
         self.stdout.write('\n--- Creating Check-Ins ---')
         checkin_bulk = []
-        checkin_students = random.sample(student_objs, min(30, len(student_objs)))
-        for student in checkin_students:
-            for _ in range(random.randint(2, 5)):
-                c_date = last_monday + timedelta(days=random.randint(0, 13))
+        # Ensure check-ins only exist for today and past days
+        today_checkin_students = random.sample(student_objs, 2)
+        for student in today_checkin_students:
+            checkin_bulk.append(CheckIn(
+                student=student,
+                date=today,
+                check_in_type='qr',
+            ))
+
+        for days_ago in range(1, 7):
+            past_date = today - timedelta(days=days_ago)
+            day_students = random.sample(student_objs, random.randint(6, 12))
+            for student in day_students:
                 checkin_bulk.append(CheckIn(
                     student=student,
-                    date=c_date,
+                    date=past_date,
                     check_in_type=random.choice(['qr', 'manual']),
                 ))
 
