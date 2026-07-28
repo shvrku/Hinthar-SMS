@@ -148,7 +148,9 @@ class CheckIn(models.Model):
     )
 
     def save(self, *args, **kwargs):
-        if not self.date:
+        if self.timestamp:
+            self.date = timezone.localdate(self.timestamp)
+        elif not self.date:
             self.date = timezone.localdate()
         super().save(*args, **kwargs)
 
