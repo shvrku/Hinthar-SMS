@@ -6,11 +6,10 @@ API-first school management for people, classes, timetabling, sessions, attendan
 
 ## Standards & plans
 
-
-| Doc                                                                          | Purpose                                                                         |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `[docs/API_STANDARDS.md](docs/API_STANDARDS.md)`                             | Route naming, pagination, bulk/fetch/aggregate patterns, role hierarchy helpers |
-| `[docs/SCALING_IMPLEMENTATION_PLAN.md](docs/SCALING_IMPLEMENTATION_PLAN.md)` | Phased migration to those standards                                             |
+| Doc | Purpose |
+|-----|---------|
+| [`docs/API_STANDARDS.md`](docs/API_STANDARDS.md) | Route naming, pagination, bulk/fetch/aggregate patterns, role hierarchy |
+| [`docs/SCALING_IMPLEMENTATION_PLAN.md`](docs/SCALING_IMPLEMENTATION_PLAN.md) | Status + phased migration (full tables in Dashboard copy) |
 
 
 Interactive OpenAPI: `/api/v1/docs/` (Swagger UI).
@@ -63,10 +62,19 @@ All under `/api/v1/`.
 
 ## Roadmap
 
-- [ ] Role helpers + queryset scoping (see API standards)
-- [ ] Re-enable list pagination for unbounded resources
-- [ ] Attendance matrix filter honesty + frontend route split
-- [ ] Remove payroll residue (`paid`, teacher rate/bank) from live models
+See [`docs/SCALING_IMPLEMENTATION_PLAN.md`](docs/SCALING_IMPLEMENTATION_PLAN.md) for live status. High level:
+
+- [x] Role helpers + frontend gates
+- [x] List pagination + server `q` search
+- [x] Attendance matrix filters + route split + ad-hoc Add Students
+- [x] Matrix `class_id` required (400) + Sessions Take roll deep links
+- [x] Remove payroll residue from live models
+- [x] Check-in correction UI (`DELETE /check-ins/{id}/` + `/check-in/corrections`)
+- [ ] Check-in overview redesign (class-first, checked-in / missing)
+- [ ] QR token activate / deactivate
+- [ ] OpenAPI / bulk hygiene (Phase 5)
+- [ ] Teacher queryset scoping
+- [ ] Analytics aggregates — future
 - [ ] Academic records (exams / results) — future
 
 

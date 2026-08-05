@@ -26,13 +26,17 @@ def process_checkin_attendance(checkin):
         
         if checkin.timestamp <= grace_period_end:
             attendance.status = 'present'
+            attendance.auto_marked_by_checkin = checkin
             to_update.append(attendance)
         elif checkin.timestamp <= session.end_time:
             attendance.status = 'late'
+            attendance.auto_marked_by_checkin = checkin
             to_update.append(attendance)
 
     if to_update:
-        SessionAttendance.objects.bulk_update(to_update, ['status'])
+        SessionAttendance.objects.bulk_update(
+            to_update, ['status', 'auto_marked_by_checkin']
+        )
 
     # 2. Ad-Hoc Sessions
     adhoc_attendances = AdHocSessionAttendance.objects.select_related('ad_hoc_session').filter(
@@ -55,10 +59,14 @@ def process_checkin_attendance(checkin):
         
         if checkin.timestamp <= grace_period_end:
             att.status = 'present'
+            att.auto_marked_by_checkin = checkin
             adhoc_to_update.append(att)
         elif checkin.timestamp <= session_end:
             att.status = 'late'
+            att.auto_marked_by_checkin = checkin
             adhoc_to_update.append(att)
 
     if adhoc_to_update:
-        AdHocSessionAttendance.objects.bulk_update(adhoc_to_update, ['status'])
+        AdHocSessionAttendance.objects.bulk_update(
+            adhoc_to_update, ['status', 'auto_marked_by_checkin']
+        )

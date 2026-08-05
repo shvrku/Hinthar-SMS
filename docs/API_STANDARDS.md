@@ -1,6 +1,6 @@
 # Hinthar-SMS API Standards
 
-Standards for the Django REST Framework backend as the school management system scales (students, teachers, classes, sessions, attendance). **Payroll is out of scope** — leave the archived `payroll/` app alone and remove payroll residue from live models/APIs over time (see implementation plan).
+Standards for the Django REST Framework backend as the school management system scales (students, teachers, classes, sessions, attendance). **Payroll is out of scope** — leave the archived `payroll/` app alone; live model residue (`paid`, rates, bank) has been removed (see implementation plan).
 
 Base path: `/api/v1/`
 
@@ -129,19 +129,19 @@ Do **not** overload list endpoints with `?summary=true` for matrix data — use 
 
 ## 3. Pagination standard
 
-### Why paginate now
+### Current state
 
-Global pagination is currently **off** (`DEFAULT_PAGINATION_CLASS = None`). That is fine for small catalogs (subjects, classes) but will not scale for:
+Global pagination is **on** via `config.pagination.StandardPageNumberPagination`:
 
-- `sessions`, `session-attendances`, `check-ins`
-- `students`, `teachers` (as enrollment grows)
-- `audit-logs`
+- Default `page_size` = **50**
+- `max_page_size` = **200**
+- Query params: `page`, `page_size`
 
-Client-side slicing in the dashboard only works while the full list fits in one response.
+List ViewSets that can grow (students, teachers, sessions, attendances, check-ins, users, …) return the DRF envelope. Tiny catalogs (subjects, classes, timetable-slots) may set `pagination_class = None`.
+
+Unbounded list UIs must also support server-side search (`q`) and structured filters — never fetch-all then filter in the browser.
 
 ### Standard envelope
-
-Re-enable DRF pagination for **list ViewSets** that can grow:
 
 ```json
 {
@@ -150,13 +150,6 @@ Re-enable DRF pagination for **list ViewSets** that can grow:
   "previous": "https://…/api/v1/sessions/?page=1&page_size=50",
   "results": [ … ]
 }
-```
-
-**Recommended settings:**
-
-```python
-'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardPageNumberPagination',
-# page_size = 50, max_page_size = 200, page_size_query_param = 'page_size'
 ```
 
 | Query param | Meaning |
@@ -221,7 +214,7 @@ Rules:
 
 - Always wrap writes in `transaction.atomic()`.
 - Validate with the same serializer as create/update where possible.
-- Block deletes that violate business rules (e.g. historically `paid=True` sessions — remove once payroll residue is gone).
+- Block deletes that violate business rules (document any remaining locks in the action docstring).
 - Bulk upsert is **attendance-only** unless a new domain proves the same pattern.
 
 ---
@@ -244,13 +237,13 @@ GET /api/v1/attendance/matrix/
 | `subject_id` | Optional | Filter sessions by subject |
 | `teacher_id` | Optional | Filter sessions by teacher |
 
-Reject `class_id` missing / `all` / `adhoc` with **400** (today returns empty 200 — change when tightening).
+Reject `class_id` missing / `all` / `adhoc` with **400**. Unknown integer IDs return **404**.
 
 **Response contract** (stable):
 
 ```json
 {
-  "class_id": "12",
+  "class_id": 12,
   "sessions": [
     {
       "id": 1,
@@ -329,8 +322,8 @@ Prefer one global exception handler later for a uniform `{detail, code, fields?}
 ## 7. Payroll (scrap / freeze)
 
 - Keep `payroll/` app **unmounted** and commented.
-- Stop advertising payroll in README and OpenAPI tags.
-- Plan removal of live residue: `Session.paid`, `AdHocSession.paid`, `Teacher.default_rate`, `Teacher.bank_details`, paid-delete guards, audit hooks on `paid`.
+- Live residue removed: `Session.paid`, `AdHocSession.paid`, `Teacher.default_rate`, `Teacher.bank_details`, paid-delete guards.
+- Do not advertise payroll in README or OpenAPI tags.
 - No new payroll fields or routes until a dedicated finance milestone.
 
 ---
@@ -342,4 +335,5 @@ When changing list pagination or route names, update in the same PR:
 - This file (`docs/API_STANDARDS.md`)
 - OpenAPI descriptions on the view
 - Dashboard `lib/api.ts` client helpers
-- Stale claims in `API_UNIFIED_STRUCTURE_HISTORY.md` / README (or mark “historical”)
+- `docs/SCALING_IMPLEMENTATION_PLAN.md` status if phase completion changes
+- Dashboard `docs/FRONTEND_STANDARDS.md` when UX contracts change

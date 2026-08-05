@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 
-from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
+from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet, GenericViewSet
+from rest_framework import mixins
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -24,6 +25,17 @@ from people.models import Student, User, Teacher, Staff, Subject
 from people.views import BulkOperationsMixin
 from timetable.models import TimetableSlot, ClassStudent, Class
 from timetable.utils import generate_sessions_for_slots, get_month_end
+
+
+def revert_checkin_auto_attendance(checkin_ids):
+    """Revert only roll statuses still attributed to the deleted check-ins."""
+    regular_count = SessionAttendance.objects.filter(
+        auto_marked_by_checkin_id__in=checkin_ids
+    ).update(status='absent', auto_marked_by_checkin=None)
+    adhoc_count = AdHocSessionAttendance.objects.filter(
+        auto_marked_by_checkin_id__in=checkin_ids
+    ).update(status='absent', auto_marked_by_checkin=None)
+    return regular_count, adhoc_count
 
 
 class SessionViewSet(BulkOperationsMixin, ModelViewSet):
@@ -157,6 +169,10 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
             return SessionAttendanceListSerializer
         return SessionAttendanceSerializer
 
+    def perform_update(self, serializer):
+        # A staff edit supersedes any previous campus check-in auto-mark.
+        serializer.save(auto_marked_by_checkin=None)
+
     @action(detail=False, methods=['post'])
     def bulk_upsert(self, request):
         records = request.data.get('records', request.data)
@@ -200,6 +216,7 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
                 if key in existing:
                     obj = existing[key]
                     obj.status = status_val
+                    obj.auto_marked_by_checkin = None
                     to_update.append(obj)
                 else:
                     obj = SessionAttendance(
@@ -212,7 +229,9 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
             if to_create:
                 SessionAttendance.objects.bulk_create(to_create)
             if to_update:
-                SessionAttendance.objects.bulk_update(to_update, ['status'])
+                SessionAttendance.objects.bulk_update(
+                    to_update, ['status', 'auto_marked_by_checkin']
+                )
                 
         return Response({
             'created_count': len(to_create),
@@ -324,7 +343,13 @@ class AttendanceMatrixView(APIView):
         summary="Aggregated attendance matrix for classes",
         description="Returns combined sessions, students, and attendance records for classes filtered by class, subject, teacher, date range, or month/year.",
         parameters=[
-            OpenApiParameter('class_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='ID of the class or "all"'),
+            OpenApiParameter(
+                'class_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Integer class cohort ID (required). Values like "all" / "adhoc" are rejected.',
+            ),
             OpenApiParameter('subject_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Subject ID filter'),
             OpenApiParameter('teacher_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Teacher ID filter'),
             OpenApiParameter('date_from', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False, description='Start date (YYYY-MM-DD)'),
@@ -334,7 +359,8 @@ class AttendanceMatrixView(APIView):
         ],
         responses={
             200: OpenApiResponse(description="Success"),
-            400: OpenApiResponse(description="Bad Request"),
+            400: OpenApiResponse(description="Missing or invalid class_id"),
+            404: OpenApiResponse(description="Class not found"),
         }
     )
     def get(self, request):
@@ -346,18 +372,22 @@ class AttendanceMatrixView(APIView):
         month_raw = request.query_params.get('month')
         year_raw = request.query_params.get('year')
 
-        if not class_id_raw or class_id_raw == 'all' or class_id_raw == 'adhoc':
-            return Response({
-                'class_id': class_id_raw,
-                'sessions': [],
-                'students': [],
-                'attendances': [],
-            }, status=status.HTTP_200_OK)
+        if not class_id_raw or class_id_raw in ('all', 'adhoc'):
+            return Response(
+                {'error': 'class_id is required and must be a valid integer class ID'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             class_id_int = int(class_id_raw)
         except ValueError:
             return Response({'error': 'class_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not Class.objects.filter(pk=class_id_int).exists():
+            return Response(
+                {'error': f'Class with id {class_id_int} not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         now = timezone.localdate()
         sessions_qs = Session.objects.filter(
@@ -439,7 +469,7 @@ class AttendanceMatrixView(APIView):
         ]
 
         return Response({
-            'class_id': class_id_raw,
+            'class_id': class_id_int,
             'sessions': session_list,
             'students': student_list,
             'attendances': list(attendances),
@@ -547,7 +577,20 @@ class AdHocAttendanceMatrixView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
+class CheckInViewSet(
+    BulkOperationsMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin,
+    GenericViewSet,
+):
+    """
+    List / retrieve campus check-ins. Staff may DELETE a record to undo a
+    mis-tap; the student can then check in again via terminal/QR/manual.
+    Lesson attendance rows still attributed to the deleted check-in are safely
+    reverted to absent. Any later manual roll edit clears that attribution and
+    is therefore preserved.
+    """
     queryset = CheckIn.objects.select_related('student', 'checked_by').order_by('-timestamp')
     serializer_class = CheckInSerializer
     permission_classes = [IsStaffOrAbove]
@@ -578,6 +621,44 @@ class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
             )
 
         return qs
+
+    @extend_schema(
+        summary="Delete a campus check-in",
+        description=(
+            "Removes a check-in record so staff can correct a mis-tap. "
+            "Attendance statuses still auto-attributed to this check-in are "
+            "reverted to absent; later manual roll edits are preserved."
+        ),
+        responses={204: OpenApiResponse(description="Deleted"), 404: OpenApiResponse(description="Not found")},
+    )
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        with transaction.atomic():
+            revert_checkin_auto_attendance([instance.id])
+            instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = self.get_queryset().filter(pk__in=ids)
+        actual_ids = list(qs.values_list('id', flat=True))
+        with transaction.atomic():
+            regular_count, adhoc_count = revert_checkin_auto_attendance(actual_ids)
+            deleted_count = qs.count()
+            qs.delete()
+        return Response({
+            'deleted_count': deleted_count,
+            'deleted_ids': actual_ids,
+            'reverted_session_attendances': regular_count,
+            'reverted_adhoc_attendances': adhoc_count,
+        })
 
 
 class QRCheckInView(APIView):
@@ -958,6 +1039,10 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
 
         return qs
 
+    def perform_update(self, serializer):
+        # A staff edit supersedes any previous campus check-in auto-mark.
+        serializer.save(auto_marked_by_checkin=None)
+
     @action(detail=False, methods=['post'])
     def bulk_upsert(self, request):
         records = request.data.get('records', request.data)
@@ -1001,6 +1086,7 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
                 if key in existing:
                     obj = existing[key]
                     obj.status = status_val
+                    obj.auto_marked_by_checkin = None
                     to_update.append(obj)
                 else:
                     obj = AdHocSessionAttendance(
@@ -1013,7 +1099,9 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
             if to_create:
                 AdHocSessionAttendance.objects.bulk_create(to_create)
             if to_update:
-                AdHocSessionAttendance.objects.bulk_update(to_update, ['status'])
+                AdHocSessionAttendance.objects.bulk_update(
+                    to_update, ['status', 'auto_marked_by_checkin']
+                )
                 
         return Response({
             'created_count': len(to_create),

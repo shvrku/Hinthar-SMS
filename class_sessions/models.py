@@ -57,6 +57,14 @@ class SessionAttendance(models.Model):
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='attendances')
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='attendances')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='absent')
+    auto_marked_by_checkin = models.ForeignKey(
+        'CheckIn',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='auto_marked_session_attendances',
+        editable=False,
+    )
     
     class Meta:
         constraints = [
@@ -111,6 +119,14 @@ class AdHocSessionAttendance(models.Model):
     ad_hoc_session = models.ForeignKey(AdHocSession, on_delete=models.CASCADE, related_name='attendances')
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='adhoc_attendances')
     status = models.CharField(max_length=20, choices=SessionAttendance.STATUS_CHOICES, default='absent')
+    auto_marked_by_checkin = models.ForeignKey(
+        'CheckIn',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='auto_marked_adhoc_attendances',
+        editable=False,
+    )
 
     class Meta:
         constraints = [

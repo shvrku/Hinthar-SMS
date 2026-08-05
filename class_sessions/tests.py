@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
 from people.models import Student
-from class_sessions.models import CheckIn, Session, SessionAttendance
+from class_sessions.models import CheckIn, Session, SessionAttendance, AdHocSession, AdHocSessionAttendance
 
 User = get_user_model()
 
@@ -274,6 +274,16 @@ class AttendanceMatrixViewTests(APITestCase):
         response = self.client.get("/api/v1/attendance/matrix/")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_matrix_endpoint_rejects_all_and_adhoc_sentinels(self):
+        self.client.force_authenticate(user=self.user)
+        for sentinel in ("all", "adhoc"):
+            response = self.client.get(f"/api/v1/attendance/matrix/?class_id={sentinel}")
+            self.assertEqual(
+                response.status_code,
+                status.HTTP_400_BAD_REQUEST,
+                msg=f"expected 400 for class_id={sentinel}",
+            )
+
     def test_matrix_endpoint_class_not_found(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.get("/api/v1/attendance/matrix/?class_id=9999")
@@ -311,4 +321,122 @@ class SessionFilterTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
 
+
+class CheckInCorrectionTests(APITestCase):
+    """Staff can delete a campus check-in to undo a mis-tap."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = User.objects.create_user(
+            username="staff_correction",
+            role="staff",
+            clerk_id="clerk_staff_corr_1",
+        )
+        self.terminal = User.objects.create_user(
+            username="terminal_correction",
+            role="terminal",
+            clerk_id="clerk_term_corr_1",
+        )
+        self.student = Student.objects.create(
+            name="Correction Student",
+            check_in_token="corr_token_abc",
+        )
+        self.checkin = CheckIn.objects.create(
+            student=self.student,
+            check_in_type="manual",
+            checked_by=self.staff,
+            date=timezone.localdate(),
+        )
+
+    def test_staff_can_delete_checkin(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.delete(f"/api/v1/check-ins/{self.checkin.id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(CheckIn.objects.filter(pk=self.checkin.id).exists())
+
+    def test_terminal_cannot_delete_checkin(self):
+        self.client.force_authenticate(user=self.terminal)
+        response = self.client.delete(f"/api/v1/check-ins/{self.checkin.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(CheckIn.objects.filter(pk=self.checkin.id).exists())
+
+    def test_staff_bulk_delete_checkins(self):
+        other = Student.objects.create(name="Other", check_in_token="corr_token_other")
+        second = CheckIn.objects.create(
+            student=other,
+            check_in_type="qr",
+            checked_by=self.staff,
+            date=timezone.localdate(),
+        )
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.delete(
+            "/api/v1/check-ins/bulk_delete/",
+            {"ids": [self.checkin.id, second.id]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["deleted_count"], 2)
+
+    def test_delete_reverts_auto_marked_attendance_only(self):
+        from timetable.models import Class, TimetableSlot
+        from people.models import Teacher, Subject
+
+        class_obj = Class.objects.create(education_level='IG', cohort_identifier='Z')
+        teacher = Teacher.objects.create(name="Corr Teacher")
+        subject = Subject.objects.create(name="Corr Subject")
+        slot = TimetableSlot.objects.create(
+            class_obj=class_obj,
+            subject=subject,
+            teacher=teacher,
+            day_of_week=1,
+            start_time="09:00",
+            end_time="10:00",
+        )
+        today = timezone.localdate()
+        session = Session.objects.create(
+            timetable_slot=slot,
+            teacher=teacher,
+            class_obj=class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=9))),
+            end_time=timezone.make_aware(datetime.combine(today, datetime.min.time().replace(hour=10))),
+        )
+        auto_row = SessionAttendance.objects.create(
+            session=session,
+            student=self.student,
+            status='present',
+            auto_marked_by_checkin=self.checkin,
+        )
+        other_student = Student.objects.create(name="Manual Student", check_in_token="manual_student_tok")
+        manual_row = SessionAttendance.objects.create(
+            session=session,
+            student=other_student,
+            status='present',
+            auto_marked_by_checkin=None,
+        )
+        adhoc = AdHocSession.objects.create(
+            teacher=teacher,
+            subject=subject,
+            date=today,
+            start_time="11:00",
+            end_time="12:00",
+        )
+        adhoc_auto = AdHocSessionAttendance.objects.create(
+            ad_hoc_session=adhoc,
+            student=self.student,
+            status='late',
+            auto_marked_by_checkin=self.checkin,
+        )
+
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.delete(f"/api/v1/check-ins/{self.checkin.id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        auto_row.refresh_from_db()
+        manual_row.refresh_from_db()
+        adhoc_auto.refresh_from_db()
+        self.assertEqual(auto_row.status, 'absent')
+        self.assertIsNone(auto_row.auto_marked_by_checkin_id)
+        self.assertEqual(manual_row.status, 'present')
+        self.assertEqual(adhoc_auto.status, 'absent')
+        self.assertIsNone(adhoc_auto.auto_marked_by_checkin_id)
 
