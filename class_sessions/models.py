@@ -19,8 +19,6 @@ class Session(models.Model):
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
-    paid = models.BooleanField(default=False)
-    # payslip = models.ForeignKey('payroll.Payslip', on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')  # Archived
     
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
@@ -40,10 +38,8 @@ class Session(models.Model):
         indexes = [
             models.Index(fields=['class_obj', 'start_time'], name='idx_session_class_start'),
             models.Index(fields=['teacher', 'start_time'], name='idx_session_teacher_start'),
-            models.Index(fields=['status', 'paid'], name='idx_session_status_paid'),
             models.Index(fields=['start_time']),
             models.Index(fields=['status']),
-            models.Index(fields=['paid']),
         ]
         
     def __str__(self):
@@ -55,6 +51,7 @@ class SessionAttendance(models.Model):
         ('present', 'Present'),
         ('absent', 'Absent'),
         ('late', 'Late'),
+        ('excused', 'Excused'),
     ]
     
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='attendances')
@@ -85,7 +82,6 @@ class AdHocSession(models.Model):
     start_time = models.TimeField()
     end_time = models.TimeField()
     status = models.CharField(max_length=20, choices=Session.STATUS_CHOICES, default='scheduled')
-    paid = models.BooleanField(default=False)
 
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
@@ -105,7 +101,6 @@ class AdHocSession(models.Model):
         indexes = [
             models.Index(fields=['teacher', 'date']),
             models.Index(fields=['status']),
-            models.Index(fields=['paid']),
         ]
 
     def __str__(self):

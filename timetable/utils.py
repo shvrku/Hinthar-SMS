@@ -61,7 +61,6 @@ def generate_sessions_for_slots(slots, start_date=None, end_date=None):
                         'teacher': slot.teacher,
                         'class_obj': slot.class_obj,
                         'status': 'scheduled',
-                        'paid': False,
                     }
                 )
 

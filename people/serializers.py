@@ -24,11 +24,18 @@ class UserSerializer(serializers.ModelSerializer):
             'is_active'
         ]
         read_only_fields = [
-            'id', 
-            'teacher_profile_id', 
-            'student_profile_id', 
-            'staff_profile_id'
+            'id',
+            'clerk_id',
+            'teacher_profile_id',
+            'student_profile_id',
+            'staff_profile_id',
         ]
+
+    def validate_role(self, value):
+        from people.roles import ROLE_RANK
+        if value not in ROLE_RANK:
+            raise serializers.ValidationError(f'Invalid role: {value}')
+        return value
 
 class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
@@ -41,7 +48,7 @@ class TeacherSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Teacher
-        fields = ['id', 'unique_code', 'name', 'employment_type', 'default_rate', 'contact', 'bank_details', 'join_date', 'school_code', 'user_id']
+        fields = ['id', 'unique_code', 'name', 'employment_type', 'contact', 'join_date', 'school_code', 'user_id']
         read_only_fields = ['unique_code']
 
 class StudentSerializer(serializers.ModelSerializer):
@@ -59,7 +66,7 @@ class StudentSerializer(serializers.ModelSerializer):
         if request and request.user and request.user.is_authenticated:
             user = request.user
             is_owner = (user.role == 'student' and instance.user == user)
-            is_privileged = user.role in ('terminal', 'admin', 'staff')
+            is_privileged = user.role in ('admin', 'staff')
             if not (is_owner or is_privileged):
                 representation.pop('check_in_token', None)
         else:

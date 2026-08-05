@@ -5,6 +5,7 @@ from django.db import models
 
 class User(AbstractUser):
     ROLE_CHOICES = [
+        ('pending', 'Pending'),
         ('admin', 'Admin'),
         ('staff', 'Staff'),
         ('teacher', 'Teacher'),
@@ -13,7 +14,8 @@ class User(AbstractUser):
     ]
     
     clerk_id = models.CharField(max_length=255, unique=True, db_index=True)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='student')
+    # New Clerk sign-ups JIT-provision as pending until an admin assigns a role.
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='pending')
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -44,9 +46,7 @@ class Teacher(models.Model):
     
     name = models.CharField(max_length=255)
     employment_type = models.CharField(max_length=20, choices=EMPLOYMENT_TYPES, default='tutor')
-    default_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     contact = models.CharField(max_length=500, blank=True, null=True)
-    bank_details = models.TextField(blank=True, null=True)
     join_date = models.DateField(default=timezone.now)
     school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
     unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)

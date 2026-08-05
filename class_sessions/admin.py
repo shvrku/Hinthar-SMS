@@ -4,8 +4,8 @@ from class_sessions.models import Session, SessionAttendance, CheckIn
 
 @admin.register(Session)
 class SessionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'teacher', 'start_time', 'end_time', 'status', 'paid')
-    list_filter = ('status', 'paid', 'start_time')
+    list_display = ('id', 'teacher', 'start_time', 'end_time', 'status')
+    list_filter = ('status', 'start_time')
     search_fields = ('teacher__name',)
     date_hierarchy = 'start_time'
 

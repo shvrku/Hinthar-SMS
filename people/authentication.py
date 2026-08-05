@@ -21,7 +21,7 @@ class ClerkJWTAuthenticationScheme(OpenApiAuthenticationExtension):
             'description': 'Clerk-issued JWT token.',
         }
 
-DEFAULT_ROLE = 'student'
+DEFAULT_ROLE = 'pending'
 
 class ClerkJWTAuthentication(authentication.BaseAuthentication):
     """
@@ -124,16 +124,17 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
         except Exception as e:
             raise exceptions.AuthenticationFailed(f"Token verification failed: {str(e)}")
 
-        # 5. Extract identity claims (NOT role — roles are managed in Django admin)
+        # 5. Extract identity claims (NOT role — roles are managed in Django admin).
+        #    Expect custom session-token claims from Clerk Dashboard → Sessions:
+        #      { "email": "{{user.primary_email_address}}", "username": "{{user.username}}" }
         clerk_id = payload.get('sub')
         if not clerk_id:
             raise exceptions.AuthenticationFailed("Token does not contain 'sub' claim.")
 
-        email = payload.get('email') or payload.get('primary_email_address') or ""
-        username = payload.get('username') or email.split('@')[0] if email else clerk_id
+        email, username = self._identity_from_claims(payload, clerk_id)
 
         # 6. JIT provision the User with DEFAULT_ROLE
-        #    Role is NEVER overwritten from Clerk — admins manage it via Django admin.
+        #    Role is NEVER overwritten from Clerk — admins manage it via Django /users.
         user, created = User.objects.get_or_create(
             clerk_id=clerk_id,
             defaults={
@@ -145,9 +146,60 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
             }
         )
 
-        # 7. Sync email only (not role) if it changed
-        if not created and email and user.email != email:
-            user.email = email
-            user.save(update_fields=['email'])
+        # 7. Sync identity fields only (never role) when Clerk claims improve
+        if not created:
+            self._sync_identity(user, email=email, username=username)
 
         return (user, token)
+
+    @staticmethod
+    def _identity_from_claims(payload, clerk_id: str) -> tuple[str, str]:
+        """
+        Resolve email + username from the Clerk session JWT.
+
+        Prefer explicit claims added via Clerk session-token customization.
+        Fall back to email local-part, then clerk_id, so JIT never fails.
+        """
+        email = (
+            payload.get('email')
+            or payload.get('primary_email_address')
+            or payload.get('primaryEmail')
+            or ''
+        )
+        if isinstance(email, str):
+            email = email.strip()
+        else:
+            email = ''
+
+        username_claim = payload.get('username') or payload.get('user_username') or ''
+        if isinstance(username_claim, str):
+            username_claim = username_claim.strip()
+        else:
+            username_claim = ''
+
+        if username_claim:
+            username = username_claim
+        elif email and '@' in email:
+            username = email.split('@', 1)[0]
+        else:
+            username = clerk_id
+
+        return email, username
+
+    @staticmethod
+    def _sync_identity(user, *, email: str, username: str) -> None:
+        """Update email/username from Clerk without touching role."""
+        update_fields: list[str] = []
+
+        if email and user.email != email:
+            user.email = email
+            update_fields.append('email')
+
+        if username and user.username != username:
+            taken = User.objects.filter(username=username).exclude(pk=user.pk).exists()
+            if not taken:
+                user.username = username
+                update_fields.append('username')
+
+        if update_fields:
+            user.save(update_fields=update_fields)

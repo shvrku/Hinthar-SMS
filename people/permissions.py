@@ -1,169 +1,146 @@
 from rest_framework import permissions
 
+from people.roles import (
+    can_check_in,
+    is_admin,
+    is_staff_or_above,
+    is_terminal_or_above,
+)
+
 
 class IsAuthenticatedNonTerminal(permissions.BasePermission):
     """
-    Default DRF permission: admin/staff get full access,
-    terminal gets read-only. Student and teacher are blocked
-    by default — they can only access views with explicit permissions.
+    Legacy default: staff+ full access; terminal SAFE only.
+    Prefer IsStaffOrAbove for new views — terminal should not get broad reads (E1).
     """
+
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
-
-        # Admin and staff get full read + write
-        if request.user.role in ('admin', 'staff'):
+        if is_staff_or_above(request.user):
             return True
-
-        # Terminal gets read-only
         if request.user.role == 'terminal':
             return request.method in permissions.SAFE_METHODS
-
-        # Student and teacher are blocked by default
         return False
+
+
+class IsStaffOrAbove(permissions.BasePermission):
+    """Admin or staff — day-to-day school operations."""
+
+    def has_permission(self, request, view):
+        return is_staff_or_above(request.user)
+
+
+# Alias kept for existing imports
+IsStaffOrAdmin = IsStaffOrAbove
+
+
+class IsAdmin(permissions.BasePermission):
+    """Admin only."""
+
+    def has_permission(self, request, view):
+        return is_admin(request.user)
+
+
+class IsTerminalOrAbove(permissions.BasePermission):
+    """Admin, staff, or terminal."""
+
+    def has_permission(self, request, view):
+        return is_terminal_or_above(request.user)
 
 
 class CanCheckIn(permissions.BasePermission):
     """
-    Allows access to terminal accounts for check-in operations,
-    plus staff, admin, and teachers who may process manual check-ins.
+    Check-in write access: terminal, staff, admin.
+    Teachers are excluded until a teacher portal exists (D1).
     """
-    def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated and
-            request.user.role in ('terminal', 'admin', 'staff', 'teacher')
-        )
 
-
-class IsAdmin(permissions.BasePermission):
-    """
-    Allows access only to Admin users.
-    """
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated and 
-            request.user.role == 'admin'
-        )
+        return can_check_in(request.user)
 
 
 class IsOwnerTeacher(permissions.BasePermission):
-    """
-    Allows access to Teachers, and checks object-level ownership if needed.
-    """
+    """Teacher role + object ownership (for future teacher portal)."""
+
     def has_permission(self, request, view):
         return (
-            request.user.is_authenticated and 
-            request.user.role == 'teacher'
+            request.user.is_authenticated
+            and request.user.role == 'teacher'
         )
 
     def has_object_permission(self, request, view, obj):
-        # Checks if user has a teacher record and matches the object
         if not hasattr(request.user, 'teacher_profile') or not request.user.teacher_profile:
             return False
-            
-        # If the object is the Teacher record itself
         if obj == request.user.teacher_profile:
             return True
-            
-        # Or if the object references a teacher
         teacher_attr = getattr(obj, 'teacher', None)
         return teacher_attr == request.user.teacher_profile
 
 
 class IsOwnerStudent(permissions.BasePermission):
-    """
-    Allows access to Students, and checks object-level ownership if needed.
-    """
     def has_permission(self, request, view):
         return (
-            request.user.is_authenticated and 
-            request.user.role == 'student'
+            request.user.is_authenticated
+            and request.user.role == 'student'
         )
 
     def has_object_permission(self, request, view, obj):
-        # Checks if user has a student record and matches the object
         if not hasattr(request.user, 'student_profile') or not request.user.student_profile:
             return False
-            
         if obj == request.user.student_profile:
             return True
-            
         student_attr = getattr(obj, 'student', None)
         return student_attr == request.user.student_profile
 
 
 class IsOwnerStaff(permissions.BasePermission):
-    """
-    Allows access to Staff, and checks object-level ownership if needed.
-    """
     def has_permission(self, request, view):
         return (
-            request.user.is_authenticated and 
-            request.user.role == 'staff'
+            request.user.is_authenticated
+            and request.user.role == 'staff'
         )
 
     def has_object_permission(self, request, view, obj):
         if not hasattr(request.user, 'staff_profile') or not request.user.staff_profile:
             return False
-            
         if obj == request.user.staff_profile:
             return True
-            
         staff_attr = getattr(obj, 'staff', None)
         return staff_attr == request.user.staff_profile
 
 
-class IsStaffOrAdmin(permissions.BasePermission):
-    """Allows access only to Staff or Admin users."""
-    def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated and
-            request.user.role in ('admin', 'staff')
-        )
-
-
 class IsStudentOwnerOrStaffOrAdmin(permissions.BasePermission):
-    """
-    Allows access if the user is:
-    - the student themselves (the Student's linked User == request.user), or
-    - Staff, or
-    - Admin.
-    """
     def has_permission(self, request, view):
         return request.user.is_authenticated
 
     def has_object_permission(self, request, view, obj):
-        if request.user.role in ('admin', 'staff'):
+        if is_staff_or_above(request.user):
             return True
         if request.user.role == 'student' and obj.user == request.user:
             return True
         return False
 
 
-class IsTerminalOrAbove(permissions.BasePermission):
-    """Allows access to terminal, admin, and staff roles."""
-    def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated and
-            request.user.role in ('terminal', 'admin', 'staff')
-        )
-
-
 class IsAdminOrReadOnlyAuthenticated(permissions.BasePermission):
-    """Allows full access to Admins, and read-only access to Authenticated users."""
+    """
+    Deprecated for operational data — too broad (any auth user can read).
+    Prefer IsStaffOrAbove. Kept for tests / gradual migration.
+    """
+
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
-        if request.user.role == 'admin':
+        if is_admin(request.user):
             return True
         return request.method in permissions.SAFE_METHODS
 
 
 class IsStaffOrAdminOrReadOnlyAuthenticated(permissions.BasePermission):
-    """Allows full access to Staff and Admins, and read-only access to Authenticated users."""
+    """Deprecated — prefer IsStaffOrAbove for both read and write."""
+
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
-        if request.user.role in ('admin', 'staff'):
+        if is_staff_or_above(request.user):
             return True
         return request.method in permissions.SAFE_METHODS

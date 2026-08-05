@@ -1,7 +1,6 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
@@ -11,21 +10,22 @@ from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
-from people.permissions import IsAdmin, IsStaffOrAdmin, IsAdminOrReadOnlyAuthenticated, IsStaffOrAdminOrReadOnlyAuthenticated
+from people.permissions import IsStaffOrAbove
 from people.views import BulkOperationsMixin
 
 
 class ClassViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Class.objects.order_by('id')
     serializer_class = ClassSerializer
-    permission_classes = [IsStaffOrAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    pagination_class = None  # small catalog — used as dropdown options
 
 
 class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = ClassStudent.objects.select_related('class_obj', 'student__user').order_by('id')
     serializer_class = ClassStudentSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
     def get_queryset(self):
@@ -42,8 +42,9 @@ class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
 class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').order_by('id')
     serializer_class = TimetableSlotSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    pagination_class = None  # scoped by class in practice; keep full for timetable editors
     
     def _validate_no_overlap(self, day, start, end, teacher, room, exclude_pk=None):
         """Check teacher and room double-booking. Raises ValidationError if overlap found."""
@@ -87,7 +88,6 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
                 'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
                 'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
                 'status': session.status,
-                'paid': session.paid,
             }
         return {
             'total_created': len(created),
@@ -174,7 +174,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
 
 
 class TeacherTimetableView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Teacher timetable",
@@ -193,7 +193,7 @@ class TeacherTimetableView(APIView):
 
 
 class ClassTimetableView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Class timetable",

@@ -148,7 +148,7 @@ REST_FRAMEWORK = {
         'people.authentication.ClerkJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'people.permissions.IsAuthenticatedNonTerminal',
+        'people.permissions.IsStaffOrAbove',
     ],
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.ScopedRateThrottle',
@@ -156,14 +156,14 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'checkin': '10/minute',
     },
-    'DEFAULT_PAGINATION_CLASS': None,
+    'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardPageNumberPagination',
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
 # OpenAPI Schema Documentation Configuration
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Hinthar School Management System API',
-    'DESCRIPTION': 'Core API for managing classes, timetabling, sessions, attendance, and payroll.',
+    'DESCRIPTION': 'Core API for managing classes, timetabling, sessions, attendance, and check-in.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'ENUM_NAME_OVERRIDES': {

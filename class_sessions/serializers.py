@@ -31,7 +31,7 @@ class SessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'timetable_slot', 'teacher', 'class_obj',
             'teacher_id', 'class_obj_id', 'timetable_slot_id',
-            'start_time', 'end_time', 'status', 'paid'
+            'start_time', 'end_time', 'status'
         ]
         validators = []
 
@@ -125,7 +125,7 @@ class AdHocSessionSerializer(serializers.ModelSerializer):
         model = AdHocSession
         fields = [
             'id', 'teacher', 'subject', 'teacher_id', 'subject_id',
-            'date', 'start_time', 'end_time', 'status', 'paid'
+            'date', 'start_time', 'end_time', 'status'
         ]
 
     def validate(self, attrs):

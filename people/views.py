@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
@@ -11,7 +12,8 @@ from people.serializers import (
     UserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
 from people.models import Subject, Teacher, Student, Staff, AuditLog
-from people.permissions import IsAdmin, IsStaffOrAdmin, IsStudentOwnerOrStaffOrAdmin, IsAdminOrReadOnlyAuthenticated
+from people.permissions import IsAdmin, IsStaffOrAbove, IsStudentOwnerOrStaffOrAdmin
+from people.roles import ROLE_RANK
 
 User = get_user_model()
 
@@ -61,7 +63,8 @@ class BulkOperationsMixin:
 class MeView(APIView):
     """
     Returns the authenticated user's profile info.
-    This endpoint is JIT provisioned automatically upon token validation.
+    JIT-provisioned on token validation (role=pending for new users).
+    Allowed for every authenticated role including pending.
     """
     permission_classes = [IsAuthenticated]
     
@@ -78,15 +81,33 @@ class MeView(APIView):
 class SubjectViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Subject.objects.order_by('id')
     serializer_class = SubjectSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    pagination_class = None  # small catalog — used as dropdown options
 
 
 class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Teacher.objects.select_related('user').order_by('id')
     serializer_class = TeacherSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = (self.request.query_params.get('q') or '').strip()
+        school_code = self.request.query_params.get('school_code')
+        employment_type = self.request.query_params.get('employment_type')
+
+        if q:
+            qs = qs.filter(
+                Q(name__icontains=q) | Q(unique_code__icontains=q) | Q(contact__icontains=q)
+            )
+        if school_code and school_code != 'all':
+            qs = qs.filter(school_code=school_code)
+        if employment_type and employment_type != 'all':
+            qs = qs.filter(employment_type=employment_type)
+
+        return qs
 
     @extend_schema(
         request=TeacherSerializer(many=True),
@@ -101,8 +122,25 @@ class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
 class StudentViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Student.objects.select_related('user').order_by('id')
     serializer_class = StudentSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = (self.request.query_params.get('q') or '').strip()
+        school_code = self.request.query_params.get('school_code')
+
+        if q:
+            qs = qs.filter(
+                Q(name__icontains=q)
+                | Q(unique_code__icontains=q)
+                | Q(exam_candidate_number__icontains=q)
+                | Q(contact__icontains=q)
+            )
+        if school_code and school_code != 'all':
+            qs = qs.filter(school_code=school_code)
+
+        return qs
 
     @extend_schema(
         request=StudentSerializer(many=True),
@@ -122,7 +160,7 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         return Response({'check_in_token': student.check_in_token})
 
     @action(detail=True, methods=['post'],
-            permission_classes=[IsStaffOrAdmin])
+            permission_classes=[IsStaffOrAbove])
     def regenerate_check_in_token(self, request, pk=None):
         """Regenerate a student's check-in token. Staff or admin only."""
         student = self.get_object()
@@ -133,17 +171,55 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
 class StaffViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Staff.objects.select_related('user').order_by('id')
     serializer_class = StaffSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
 
 class UserViewSet(BulkOperationsMixin, ModelViewSet):
+    """
+    Account / role administration. Admin only.
+    Staff operate the school but cannot elevate privileges.
+    """
     queryset = User.objects.select_related(
         'teacher_profile', 'student_profile', 'staff_profile'
     ).order_by('id')
     serializer_class = UserSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsAdmin]
     ordering = ['id']
+    http_method_names = ['get', 'head', 'options', 'patch', 'put']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = (self.request.query_params.get('q') or '').strip()
+        role = self.request.query_params.get('role')
+
+        if q:
+            qs = qs.filter(
+                Q(username__icontains=q) | Q(email__icontains=q) | Q(clerk_id__icontains=q)
+            )
+        if role and role != 'all':
+            qs = qs.filter(role=role)
+
+        return qs
+
+    def partial_update(self, request, *args, **kwargs):
+        """Only allow role / is_active changes; never clerk_id or self-demotion traps."""
+        instance = self.get_object()
+        # Prevent removing the last admin or demoting yourself accidentally without care
+        new_role = request.data.get('role', instance.role)
+        if instance.role == 'admin' and new_role != 'admin':
+            other_admins = User.objects.filter(role='admin').exclude(pk=instance.pk).count()
+            if other_admins == 0:
+                return Response(
+                    {'error': 'Cannot demote the last admin user.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if new_role is not None and new_role not in ROLE_RANK:
+            return Response(
+                {'error': f'Invalid role. Must be one of: {sorted(ROLE_RANK.keys())}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().partial_update(request, *args, **kwargs)
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

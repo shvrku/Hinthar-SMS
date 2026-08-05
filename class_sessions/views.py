@@ -5,11 +5,11 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.core.cache import cache
 from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
@@ -19,7 +19,7 @@ from class_sessions.serializers import (
     AdHocSessionSerializer, AdHocSessionAttendanceSerializer
 )
 from class_sessions.utils import process_checkin_attendance
-from people.permissions import IsAdmin, IsOwnerTeacher, CanCheckIn, IsAuthenticatedNonTerminal, IsTerminalOrAbove, IsStaffOrAdminOrReadOnlyAuthenticated, IsAdminOrReadOnlyAuthenticated
+from people.permissions import IsStaffOrAbove, CanCheckIn
 from people.models import Student, User, Teacher, Staff, Subject
 from people.views import BulkOperationsMixin
 from timetable.models import TimetableSlot, ClassStudent, Class
@@ -33,7 +33,7 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
         'timetable_slot__teacher__user',
     ).prefetch_related('attendances').order_by('id')
     serializer_class = SessionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
     
     def get_queryset(self):
@@ -46,7 +46,7 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
         month_param = self.request.query_params.get('month')
         year_param = self.request.query_params.get('year')
         status_param = self.request.query_params.get('status')
-        paid_param = self.request.query_params.get('paid')
+        q = (self.request.query_params.get('q') or '').strip()
         
         if teacher_id:
             qs = qs.filter(teacher_id=teacher_id)
@@ -64,23 +64,17 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(start_time__year=year_param)
         if status_param:
             qs = qs.filter(status=status_param)
-        if paid_param:
-            qs = qs.filter(paid=paid_param.lower() == 'true')
+        if q:
+            qs = qs.filter(
+                Q(teacher__name__icontains=q)
+                | Q(class_obj__education_level__icontains=q)
+                | Q(class_obj__cohort_identifier__icontains=q)
+                | Q(status__icontains=q)
+            )
         
         return qs
-    
-    def get_permissions(self):
-        if self.action in ['create', 'destroy', 'bulk_delete']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
 
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        if instance.paid:
-            return Response(
-                {'error': 'Cannot delete a session that has already been paid in payroll.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['delete'])
@@ -93,11 +87,6 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             )
         
         qs = self.get_queryset().filter(pk__in=ids)
-        if qs.filter(paid=True).exists():
-            return Response(
-                {'error': 'Cannot delete sessions that have already been paid in payroll.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         with transaction.atomic():
             deleted_count, _ = qs.delete()
         return Response(
@@ -105,7 +94,7 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             status=status.HTTP_200_OK
         )
     
-    @action(detail=True, methods=['patch'], permission_classes=[IsOwnerTeacher])
+    @action(detail=True, methods=['patch'])
     def status(self, request, pk=None):
         session = self.get_object()
         new_status = request.data.get('status')
@@ -130,7 +119,7 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         'student'
     ).order_by('id')
     serializer_class = SessionAttendanceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
     def get_queryset(self):
@@ -161,20 +150,20 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         return qs
     
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete', 'bulk_upsert']:
-            return [(IsAdmin | IsOwnerTeacher)()]
-        return [IsAuthenticated()]
+        return [IsStaffOrAbove()]
 
     def get_serializer_class(self):
         if self.action == 'list':
             return SessionAttendanceListSerializer
         return SessionAttendanceSerializer
 
-    @action(detail=False, methods=['post'], permission_classes=[IsAdmin | IsOwnerTeacher])
+    @action(detail=False, methods=['post'])
     def bulk_upsert(self, request):
         records = request.data.get('records', request.data)
         if not isinstance(records, list):
             return Response({'error': 'Expected a list of attendance records'}, status=status.HTTP_400_BAD_REQUEST)
+
+        valid_statuses = {c[0] for c in SessionAttendance.STATUS_CHOICES}
         
         session_ids = set()
         student_ids = set()
@@ -201,6 +190,11 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
                 s_id = int(s_id)
                 st_id = int(st_id)
                 status_val = r.get('status', 'present')
+                if status_val not in valid_statuses:
+                    return Response(
+                        {'error': f'Invalid status "{status_val}". Must be one of {sorted(valid_statuses)}'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 
                 key = (s_id, st_id)
                 if key in existing:
@@ -227,7 +221,7 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
 
 
 class GenerateClassSessionsView(APIView):
-    permission_classes = [IsAdmin]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Generate sessions for a class",
@@ -308,7 +302,6 @@ class GenerateClassSessionsView(APIView):
                 'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
                 'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
                 'status': session.status,
-                'paid': session.paid,
             }
 
         return Response({
@@ -325,7 +318,7 @@ class GenerateClassSessionsView(APIView):
 
 
 class AttendanceMatrixView(APIView):
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Aggregated attendance matrix for classes",
@@ -373,6 +366,18 @@ class AttendanceMatrixView(APIView):
             'timetable_slot__subject', 'teacher__user', 'class_obj'
         ).order_by('start_time')
 
+        if subject_id_raw and subject_id_raw != 'all':
+            try:
+                sessions_qs = sessions_qs.filter(timetable_slot__subject_id=int(subject_id_raw))
+            except ValueError:
+                return Response({'error': 'subject_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if teacher_id_raw and teacher_id_raw != 'all':
+            try:
+                sessions_qs = sessions_qs.filter(teacher_id=int(teacher_id_raw))
+            except ValueError:
+                return Response({'error': 'teacher_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+
         if date_from_raw:
             sessions_qs = sessions_qs.filter(start_time__date__gte=date_from_raw)
         if date_to_raw:
@@ -412,6 +417,7 @@ class AttendanceMatrixView(APIView):
             student_list.append({
                 'id': st.id,
                 'name': st.name,
+                'unique_code': st.unique_code,
                 'user_id': getattr(st, 'user_id', None),
                 'records': records
             })
@@ -428,7 +434,6 @@ class AttendanceMatrixView(APIView):
                 'class_obj_id': s.class_obj_id,
                 'class_name': str(s.class_obj) if s.class_obj else None,
                 'status': s.status,
-                'paid': s.paid,
             }
             for s in sessions
         ]
@@ -442,7 +447,7 @@ class AttendanceMatrixView(APIView):
 
 
 class AdHocAttendanceMatrixView(APIView):
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Aggregated attendance matrix for ad-hoc sessions",
@@ -508,7 +513,7 @@ class AdHocAttendanceMatrixView(APIView):
         if student_ids_in_att:
             students = list(Student.objects.filter(pk__in=student_ids_in_att).order_by('name'))
         else:
-            students = list(Student.objects.all().order_by('name'))
+            students = []
 
         session_list = [
             {
@@ -521,7 +526,6 @@ class AdHocAttendanceMatrixView(APIView):
                 'teacher_id': s.teacher_id,
                 'teacher_name': s.teacher.name if s.teacher else None,
                 'status': s.status,
-                'paid': s.paid,
             }
             for s in sessions
         ]
@@ -530,6 +534,7 @@ class AdHocAttendanceMatrixView(APIView):
             {
                 'id': st.id,
                 'name': st.name,
+                'unique_code': st.unique_code,
                 'user_id': st.user_id,
             }
             for st in students
@@ -545,7 +550,7 @@ class AdHocAttendanceMatrixView(APIView):
 class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
     queryset = CheckIn.objects.select_related('student', 'checked_by').order_by('-timestamp')
     serializer_class = CheckInSerializer
-    permission_classes = [IsAuthenticatedNonTerminal]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['-timestamp']
 
     def get_queryset(self):
@@ -555,6 +560,7 @@ class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
         check_in_type = self.request.query_params.get('check_in_type')
+        q = (self.request.query_params.get('q') or '').strip()
 
         if student_id:
             qs = qs.filter(student_id=student_id)
@@ -566,6 +572,10 @@ class CheckInViewSet(BulkOperationsMixin, ReadOnlyModelViewSet):
             qs = qs.filter(date__lte=date_to)
         if check_in_type:
             qs = qs.filter(check_in_type=check_in_type)
+        if q:
+            qs = qs.filter(
+                Q(student__name__icontains=q) | Q(student__unique_code__icontains=q)
+            )
 
         return qs
 
@@ -639,14 +649,97 @@ class QRCheckInView(APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+class CheckInLookupView(APIView):
+    """
+    Resolve a single student for the check-in terminal WITHOUT creating a check-in.
+
+    Accepts one of:
+      - check_in_token  (from a scanned QR code)
+      - unique_code     (e.g. "HIS26-00001", typed manually)
+
+    Returns only safe display fields (never the QR token, never the full roster)
+    so staff can confirm the correct student before committing the check-in.
+    """
+    permission_classes = [CanCheckIn]
+    throttle_scope = 'checkin'
+
+    @extend_schema(
+        summary="Look up a student for check-in confirmation",
+        description=(
+            "Resolve a student by QR check_in_token or by unique_code without "
+            "recording a check-in. Used by the terminal to show a confirmation "
+            "card before committing."
+        ),
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'check_in_token': {'type': 'string'},
+                    'unique_code': {'type': 'string'},
+                },
+            },
+        },
+        responses={
+            200: OpenApiResponse(description="Student resolved"),
+            400: OpenApiResponse(description="Missing lookup input"),
+            404: OpenApiResponse(description="No matching student"),
+        },
+    )
+    def post(self, request):
+        token = (request.data.get('check_in_token') or '').strip()
+        unique_code = (request.data.get('unique_code') or '').strip()
+
+        if not token and not unique_code:
+            return Response(
+                {'error': 'Provide check_in_token or unique_code'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        student = None
+        method = None
+        if token:
+            student = Student.objects.filter(check_in_token=token).first()
+            method = 'qr'
+        if student is None and unique_code:
+            student = Student.objects.filter(unique_code__iexact=unique_code).first()
+            method = 'manual'
+
+        if student is None:
+            return Response(
+                {'error': 'No student found for this code.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        enrollment = (
+            ClassStudent.objects
+            .select_related('class_obj')
+            .filter(student=student)
+            .first()
+        )
+        class_name = str(enrollment.class_obj) if enrollment and enrollment.class_obj else None
+
+        already = CheckIn.objects.filter(
+            student=student, date=timezone.localdate()
+        ).exists()
+
+        return Response({
+            'id': student.id,
+            'name': student.name,
+            'unique_code': student.unique_code,
+            'class_name': class_name,
+            'checked_in_today': already,
+            'method': method,
+        }, status=status.HTTP_200_OK)
+
+
 class StatsView(APIView):
-    permission_classes = [IsTerminalOrAbove]
+    permission_classes = [IsStaffOrAbove]
     STATS_CACHE_KEY = 'stats_counts'
     STATS_CACHE_TTL = 300  # 5 minutes
 
     @extend_schema(
         summary="System statistics",
-        description="Returns record counts for all tables in the system. Terminal, admin, and staff roles only.",
+        description="Returns record counts for all tables in the system. Staff and admin only.",
         responses={
             200: {
                 'type': 'object',
@@ -774,7 +867,7 @@ class ManualCheckInView(APIView):
 class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = AdHocSession.objects.select_related('teacher__user', 'subject').order_by('id')
     serializer_class = AdHocSessionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
     
     def get_queryset(self):
@@ -784,6 +877,7 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
         date_to = self.request.query_params.get('date_to')
         status_param = self.request.query_params.get('status')
         subject_id = self.request.query_params.get('subject_id')
+        q = (self.request.query_params.get('q') or '').strip()
         
         if teacher_id:
             qs = qs.filter(teacher_id=teacher_id)
@@ -795,21 +889,14 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(status=status_param)
         if subject_id:
             qs = qs.filter(subject_id=subject_id)
+        if q:
+            qs = qs.filter(
+                Q(teacher__name__icontains=q) | Q(subject__name__icontains=q) | Q(status__icontains=q)
+            )
         
         return qs
 
-    def get_permissions(self):
-        if self.action in ['create', 'destroy', 'bulk_delete']:
-            return [IsAdmin()]
-        return [IsAuthenticated()]
-
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        if instance.paid:
-            return Response(
-                {'error': 'Cannot delete an ad-hoc session that has already been paid in payroll.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['delete'])
@@ -822,11 +909,6 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
             )
         
         qs = self.get_queryset().filter(pk__in=ids)
-        if qs.filter(paid=True).exists():
-            return Response(
-                {'error': 'Cannot delete ad-hoc sessions that have already been paid in payroll.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         with transaction.atomic():
             deleted_count, _ = qs.delete()
         return Response(
@@ -834,7 +916,7 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
             status=status.HTTP_200_OK
         )
 
-    @action(detail=True, methods=['patch'], permission_classes=[IsOwnerTeacher])
+    @action(detail=True, methods=['patch'])
     def status(self, request, pk=None):
         session = self.get_object()
         new_status = request.data.get('status')
@@ -858,7 +940,7 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         'ad_hoc_session__teacher', 'ad_hoc_session__subject', 'student'
     ).order_by('id')
     serializer_class = AdHocSessionAttendanceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
     def get_queryset(self):
@@ -876,16 +958,13 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
 
         return qs
 
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_create', 'bulk_delete', 'bulk_upsert']:
-            return [(IsAdmin | IsOwnerTeacher)()]
-        return [IsAuthenticated()]
-
-    @action(detail=False, methods=['post'], permission_classes=[IsAdmin | IsOwnerTeacher])
+    @action(detail=False, methods=['post'])
     def bulk_upsert(self, request):
         records = request.data.get('records', request.data)
         if not isinstance(records, list):
             return Response({'error': 'Expected a list of adhoc attendance records'}, status=status.HTTP_400_BAD_REQUEST)
+
+        valid_statuses = {c[0] for c in SessionAttendance.STATUS_CHOICES}
             
         session_ids = set()
         student_ids = set()
@@ -912,6 +991,11 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
                 s_id = int(s_id)
                 st_id = int(st_id)
                 status_val = r.get('status', 'present')
+                if status_val not in valid_statuses:
+                    return Response(
+                        {'error': f'Invalid status "{status_val}". Must be one of {sorted(valid_statuses)}'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 
                 key = (s_id, st_id)
                 if key in existing:
