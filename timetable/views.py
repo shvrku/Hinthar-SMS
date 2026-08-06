@@ -1,7 +1,7 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
 from django.db.models import Q
@@ -22,6 +22,28 @@ class ClassViewSet(BulkOperationsMixin, ModelViewSet):
     pagination_class = None  # small catalog — used as dropdown options
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'class_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Canonical class filter.',
+            ),
+            OpenApiParameter(
+                'class_obj_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                deprecated=True,
+                description='Deprecated alias for class_id.',
+            ),
+            OpenApiParameter('student_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+        ],
+    ),
+)
 class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = ClassStudent.objects.select_related('class_obj', 'student__user').order_by('id')
     serializer_class = ClassStudentSerializer
@@ -30,10 +52,10 @@ class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        class_obj_id = self.request.query_params.get('class_obj_id')
+        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
         student_id = self.request.query_params.get('student_id')
-        if class_obj_id:
-            qs = qs.filter(class_obj_id=class_obj_id)
+        if class_id:
+            qs = qs.filter(class_obj_id=class_id)
         if student_id:
             qs = qs.filter(student_id=student_id)
         return qs

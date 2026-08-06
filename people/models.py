@@ -75,6 +75,7 @@ class Student(models.Model):
     enrollment_date = models.DateField(auto_now_add=True)
     contact = models.CharField(max_length=500, blank=True, null=True)
     check_in_token = models.CharField(max_length=64, unique=True, blank=True, editable=False)
+    check_in_token_active = models.BooleanField(default=True)
     school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
     unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)
     exam_candidate_number = models.CharField(max_length=50, null=True, blank=True, unique=True, db_index=True)
@@ -97,7 +98,8 @@ class Student(models.Model):
 
     def regenerate_check_in_token(self):
         self.check_in_token = secrets.token_urlsafe(32)
-        self.save(update_fields=['check_in_token'])
+        self.check_in_token_active = True
+        self.save(update_fields=['check_in_token', 'check_in_token_active'])
 
     def __str__(self):
         return self.name

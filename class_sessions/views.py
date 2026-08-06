@@ -7,10 +7,10 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
-from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
 from django.core.cache import cache
 from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
@@ -125,6 +125,33 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
         return Response(serializer.data)
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'class_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Canonical class filter (session.class_obj).',
+            ),
+            OpenApiParameter(
+                'class_obj_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                deprecated=True,
+                description='Deprecated alias for class_id.',
+            ),
+            OpenApiParameter('session_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter('student_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter('status', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter('teacher_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter('date_from', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter('date_to', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False),
+        ],
+    ),
+)
 class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = SessionAttendance.objects.select_related(
         'session', 'session__teacher', 'session__class_obj', 'session__timetable_slot',
@@ -140,7 +167,7 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         student_id = self.request.query_params.get('student_id')
         status_param = self.request.query_params.get('status')
         teacher_id = self.request.query_params.get('teacher_id')
-        class_obj_id = self.request.query_params.get('class_obj_id')
+        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
 
@@ -152,8 +179,8 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(status=status_param)
         if teacher_id:
             qs = qs.filter(session__teacher_id=teacher_id)
-        if class_obj_id:
-            qs = qs.filter(session__class_obj_id=class_obj_id)
+        if class_id:
+            qs = qs.filter(session__class_obj_id=class_id)
         if date_from:
             qs = qs.filter(session__start_time__date__gte=date_from)
         if date_to:
@@ -173,9 +200,88 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         # A staff edit supersedes any previous campus check-in auto-mark.
         serializer.save(auto_marked_by_checkin=None)
 
+    @extend_schema(
+        summary="Bulk upsert session attendance",
+        description=(
+            "Create or update lesson attendance rows in one request. "
+            "Preferred body: `{\"records\":[…]}`. A bare JSON list is accepted as a fallback. "
+            "Canonical record fields: `session_id`, `student_id`, `status` "
+            "(present|absent|late|excused). Aliases `session` / `student` remain accepted."
+        ),
+        request={
+            'application/json': {
+                'oneOf': [
+                    {
+                        'type': 'object',
+                        'properties': {
+                            'records': {
+                                'type': 'array',
+                                'items': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'session_id': {'type': 'integer'},
+                                        'student_id': {'type': 'integer'},
+                                        'status': {
+                                            'type': 'string',
+                                            'enum': ['present', 'absent', 'late', 'excused'],
+                                        },
+                                    },
+                                    'required': ['session_id', 'student_id'],
+                                },
+                            },
+                        },
+                        'required': ['records'],
+                    },
+                    {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'session_id': {'type': 'integer'},
+                                'student_id': {'type': 'integer'},
+                                'status': {
+                                    'type': 'string',
+                                    'enum': ['present', 'absent', 'late', 'excused'],
+                                },
+                            },
+                            'required': ['session_id', 'student_id'],
+                        },
+                    },
+                ],
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'created_count': {'type': 'integer'},
+                    'updated_count': {'type': 'integer'},
+                },
+                'required': ['created_count', 'updated_count'],
+            },
+            400: OpenApiResponse(description="Invalid body or status"),
+        },
+        examples=[
+            OpenApiExample(
+                'Preferred records wrapper',
+                value={
+                    'records': [
+                        {'session_id': 1, 'student_id': 2, 'status': 'present'},
+                    ]
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Bare list fallback',
+                value=[{'session_id': 1, 'student_id': 2, 'status': 'late'}],
+                request_only=True,
+            ),
+        ],
+    )
     @action(detail=False, methods=['post'])
     def bulk_upsert(self, request):
-        records = request.data.get('records', request.data)
+        data = request.data
+        records = data if isinstance(data, list) else data.get('records', data)
         if not isinstance(records, list):
             return Response({'error': 'Expected a list of attendance records'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -660,6 +766,278 @@ class CheckInViewSet(
             'reverted_adhoc_attendances': adhoc_count,
         })
 
+    @extend_schema(
+        summary="Campus check-in overview (server-side aggregate)",
+        description=(
+            "Server-side aggregate for the check-in overview so the client never "
+            "pulls whole tables. Three mutually exclusive modes selected by query "
+            "params, all scoped to a single day:\n\n"
+            "- `search` present -> paginated student search across all classes "
+            "(matches name or unique_code), each row carrying its class and that "
+            "day's check-in status.\n"
+            "- `class_id=all` -> paginated school-wide roster (unique students "
+            "across every class). Optional `status=missing|arrived` returns one "
+            "status column for the dual Missing / Checked-in UI; `arrived`/`total` "
+            "remain full-day aggregates.\n"
+            "- `class_id=<int>` -> the roster for one class joined to that day's "
+            "check-in status, with arrived/total counts.\n"
+            "- neither -> a lightweight per-class summary (id, label, arrived, "
+            "total) for the class picker.\n\n"
+            "This is campus presence only and is independent of lesson attendance."
+        ),
+        parameters=[
+            OpenApiParameter('date', OpenApiTypes.DATE, location=OpenApiParameter.QUERY, required=False, description='Day to report on (YYYY-MM-DD). Defaults to today (server local date).'),
+            OpenApiParameter('class_id', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Integer class ID, or "all" for a school-wide unique-student roster.'),
+            OpenApiParameter('search', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='Search students by name or unique_code across all classes.'),
+            OpenApiParameter('page', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='Search/school mode: 1-based page. Default 1.'),
+            OpenApiParameter('page_size', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False, description='Search/school mode: page size (default 50, max 200).'),
+            OpenApiParameter('status', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False, description='School mode only: "missing" or "arrived" to return one status column (paginated). Omit for mixed roster.'),
+        ],
+        responses={200: OpenApiResponse(description="Success"), 400: OpenApiResponse(description="Invalid parameter")},
+    )
+    @action(detail=False, methods=['get'])
+    def overview(self, request):
+        date_raw = request.query_params.get('date')
+        if date_raw:
+            try:
+                report_date = datetime.strptime(date_raw, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'date must be YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            report_date = timezone.localdate()
+
+        search = (request.query_params.get('search') or '').strip()
+        class_id_raw = request.query_params.get('class_id')
+
+        if search:
+            return self._overview_search(request, report_date, search)
+        if class_id_raw:
+            if class_id_raw == 'all':
+                return self._overview_school(request, report_date)
+            try:
+                class_id_int = int(class_id_raw)
+            except ValueError:
+                return Response({'error': 'class_id must be a valid integer or "all"'}, status=status.HTTP_400_BAD_REQUEST)
+            return self._overview_class(report_date, class_id_int)
+        return self._overview_classes(report_date)
+
+    @staticmethod
+    def _parse_overview_page(request):
+        try:
+            page = max(int(request.query_params.get('page', 1)), 1)
+        except (TypeError, ValueError):
+            return None, None, Response(
+                {'error': 'page must be an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            page_size = min(max(int(request.query_params.get('page_size', 50)), 1), 200)
+        except (TypeError, ValueError):
+            return None, None, Response(
+                {'error': 'page_size must be an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return page, page_size, None
+
+    def _overview_classes(self, report_date):
+        classes = Class.objects.annotate(
+            total=Count('class_students__student', distinct=True),
+            arrived=Count(
+                'class_students__student__check_ins',
+                filter=Q(class_students__student__check_ins__date=report_date),
+                distinct=True,
+            ),
+        ).order_by('education_level', 'cohort_identifier', 'cohort_sub_category')
+
+        return Response({
+            'mode': 'classes',
+            'date': report_date.isoformat(),
+            'classes': [
+                {
+                    'id': cls.id,
+                    'label': str(cls),
+                    'arrived': cls.arrived,
+                    'total': cls.total,
+                }
+                for cls in classes
+            ],
+        }, status=status.HTTP_200_OK)
+
+    def _overview_school(self, request, report_date):
+        """Paginated unique students across all classes, optionally by check-in status."""
+        page, page_size, error_response = self._parse_overview_page(request)
+        if error_response is not None:
+            return error_response
+
+        status_filter = (request.query_params.get('status') or '').strip().lower()
+        if status_filter and status_filter not in ('missing', 'arrived'):
+            return Response(
+                {'error': 'status must be "missing" or "arrived"'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        enrolled = Student.objects.filter(enrolled_classes__isnull=False).distinct()
+        total = enrolled.count()
+        arrived = (
+            Student.objects.filter(
+                enrolled_classes__isnull=False,
+                check_ins__date=report_date,
+            )
+            .distinct()
+            .count()
+        )
+
+        has_checkin = Exists(
+            CheckIn.objects.filter(student_id=OuterRef('pk'), date=report_date)
+        )
+        students_qs = enrolled.annotate(has_checkin=has_checkin)
+        if status_filter == 'missing':
+            students_qs = students_qs.filter(has_checkin=False)
+        elif status_filter == 'arrived':
+            students_qs = students_qs.filter(has_checkin=True)
+
+        students_qs = students_qs.order_by('name')
+        count = students_qs.count()
+        start = (page - 1) * page_size
+        page_students = list(students_qs[start:start + page_size])
+        student_ids = [student.id for student in page_students]
+
+        class_by_student = {}
+        enrollments = (
+            ClassStudent.objects.filter(student_id__in=student_ids)
+            .select_related('class_obj')
+            .order_by(
+                'class_obj__education_level',
+                'class_obj__cohort_identifier',
+                'class_obj__cohort_sub_category',
+            )
+        )
+        for enrollment in enrollments:
+            class_by_student.setdefault(enrollment.student_id, enrollment)
+
+        checkin_map = {
+            c.student_id: c
+            for c in CheckIn.objects.filter(student_id__in=student_ids, date=report_date)
+        }
+
+        student_list = []
+        for student in page_students:
+            enrollment = class_by_student.get(student.id)
+            student_list.append({
+                'id': student.id,
+                'name': student.name,
+                'unique_code': student.unique_code,
+                'class_id': enrollment.class_obj_id if enrollment else None,
+                'class_label': str(enrollment.class_obj) if enrollment else None,
+                'check_in': self._serialize_checkin(checkin_map.get(student.id)),
+            })
+
+        num_pages = (count + page_size - 1) // page_size if count else 0
+        payload = {
+            'mode': 'school',
+            'date': report_date.isoformat(),
+            'class': {'id': None, 'label': 'All classes'},
+            'arrived': arrived,
+            'total': total,
+            'count': count,
+            'page': page,
+            'page_size': page_size,
+            'num_pages': num_pages,
+            'students': student_list,
+        }
+        if status_filter:
+            payload['status'] = status_filter
+        return Response(payload, status=status.HTTP_200_OK)
+
+    def _overview_class(self, report_date, class_id_int):
+        cls = Class.objects.filter(pk=class_id_int).first()
+        if cls is None:
+            return Response({'error': f'Class with id {class_id_int} not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        enrollments = ClassStudent.objects.filter(
+            class_obj_id=class_id_int
+        ).select_related('student').order_by('student__name')
+        students = [cs.student for cs in enrollments]
+        student_ids = [st.id for st in students]
+
+        checkin_map = {
+            c.student_id: c
+            for c in CheckIn.objects.filter(student_id__in=student_ids, date=report_date)
+        }
+
+        student_list = [
+            {
+                'id': st.id,
+                'name': st.name,
+                'unique_code': st.unique_code,
+                'check_in': self._serialize_checkin(checkin_map.get(st.id)),
+            }
+            for st in students
+        ]
+
+        return Response({
+            'mode': 'class',
+            'date': report_date.isoformat(),
+            'class': {'id': cls.id, 'label': str(cls)},
+            'arrived': len(checkin_map),
+            'total': len(students),
+            'students': student_list,
+        }, status=status.HTTP_200_OK)
+
+    def _overview_search(self, request, report_date, search):
+        page, page_size, error_response = self._parse_overview_page(request)
+        if error_response is not None:
+            return error_response
+
+        enrollments = ClassStudent.objects.filter(
+            Q(student__name__icontains=search) | Q(student__unique_code__icontains=search)
+        ).select_related('student', 'class_obj').order_by(
+            'student__name', 'class_obj__education_level', 'class_obj__cohort_identifier'
+        )
+
+        total_count = enrollments.count()
+        start = (page - 1) * page_size
+        rows = list(enrollments[start:start + page_size])
+
+        student_ids = [cs.student_id for cs in rows]
+        checkin_map = {
+            c.student_id: c
+            for c in CheckIn.objects.filter(student_id__in=student_ids, date=report_date)
+        }
+
+        results = [
+            {
+                'student_id': cs.student_id,
+                'name': cs.student.name,
+                'unique_code': cs.student.unique_code,
+                'class_id': cs.class_obj_id,
+                'class_label': str(cs.class_obj),
+                'check_in': self._serialize_checkin(checkin_map.get(cs.student_id)),
+            }
+            for cs in rows
+        ]
+
+        num_pages = (total_count + page_size - 1) // page_size if total_count else 0
+        return Response({
+            'mode': 'search',
+            'date': report_date.isoformat(),
+            'count': total_count,
+            'page': page,
+            'page_size': page_size,
+            'num_pages': num_pages,
+            'results': results,
+        }, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _serialize_checkin(checkin):
+        if checkin is None:
+            return None
+        return {
+            'id': checkin.id,
+            'timestamp': checkin.timestamp.isoformat(),
+            'check_in_type': checkin.check_in_type,
+        }
+
 
 class QRCheckInView(APIView):
     permission_classes = [CanCheckIn]
@@ -692,6 +1070,16 @@ class QRCheckInView(APIView):
                     ),
                 ],
             ),
+            403: OpenApiResponse(
+                response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
+                examples=[
+                    OpenApiExample(
+                        'Deactivated token',
+                        value={'error': 'Check-in token is deactivated'},
+                        response_only=True,
+                    ),
+                ],
+            ),
             409: OpenApiResponse(
                 response={'type': 'object', 'properties': {'error': {'type': 'string'}}},
                 examples=[
@@ -714,6 +1102,12 @@ class QRCheckInView(APIView):
                 student = Student.objects.select_for_update().get(check_in_token=token)
             except Student.DoesNotExist:
                 return Response({'error': 'Invalid check-in token'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not student.check_in_token_active:
+                return Response(
+                    {'error': 'Check-in token is deactivated'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
             today = timezone.localdate()
             if CheckIn.objects.select_for_update().filter(student=student, date=today).exists():
@@ -763,6 +1157,30 @@ class CheckInLookupView(APIView):
         responses={
             200: OpenApiResponse(description="Student resolved"),
             400: OpenApiResponse(description="Missing lookup input"),
+            403: OpenApiResponse(
+                description=(
+                    "QR token deactivated. Body includes error plus a safe nested "
+                    "student summary for the terminal confirmation card (never the raw token)."
+                ),
+                examples=[
+                    OpenApiExample(
+                        'Deactivated QR',
+                        value={
+                            'error': 'Check-in token is deactivated',
+                            'student': {
+                                'id': 1,
+                                'name': 'Example Student',
+                                'unique_code': 'HIS26-00001',
+                                'class_name': 'Grade 10A',
+                                'checked_in_today': False,
+                                'method': 'qr',
+                                'check_in_token_active': False,
+                            },
+                        },
+                        response_only=True,
+                    ),
+                ],
+            ),
             404: OpenApiResponse(description="No matching student"),
         },
     )
@@ -780,6 +1198,31 @@ class CheckInLookupView(APIView):
         method = None
         if token:
             student = Student.objects.filter(check_in_token=token).first()
+            if student and not student.check_in_token_active:
+                enrollment = (
+                    ClassStudent.objects
+                    .select_related('class_obj')
+                    .filter(student=student)
+                    .first()
+                )
+                class_name = str(enrollment.class_obj) if enrollment and enrollment.class_obj else None
+                return Response(
+                    {
+                        'error': 'Check-in token is deactivated',
+                        'student': {
+                            'id': student.id,
+                            'name': student.name,
+                            'unique_code': student.unique_code,
+                            'class_name': class_name,
+                            'checked_in_today': CheckIn.objects.filter(
+                                student=student, date=timezone.localdate()
+                            ).exists(),
+                            'method': 'qr',
+                            'check_in_token_active': False,
+                        }
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             method = 'qr'
         if student is None and unique_code:
             student = Student.objects.filter(unique_code__iexact=unique_code).first()
@@ -1016,6 +1459,29 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
         return Response(serializer.data)
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'adhoc_session_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Canonical ad-hoc session filter (client alias).',
+            ),
+            OpenApiParameter(
+                'ad_hoc_session_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                deprecated=True,
+                description='Model FK name; prefer adhoc_session_id.',
+            ),
+            OpenApiParameter('student_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+            OpenApiParameter('status', OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False),
+        ],
+    ),
+)
 class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = AdHocSessionAttendance.objects.select_related(
         'ad_hoc_session__teacher', 'ad_hoc_session__subject', 'student'
@@ -1026,12 +1492,15 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        ad_hoc_session_id = self.request.query_params.get('ad_hoc_session_id')
+        adhoc_session_id = (
+            self.request.query_params.get('adhoc_session_id')
+            or self.request.query_params.get('ad_hoc_session_id')
+        )
         student_id = self.request.query_params.get('student_id')
         status_param = self.request.query_params.get('status')
 
-        if ad_hoc_session_id:
-            qs = qs.filter(ad_hoc_session_id=ad_hoc_session_id)
+        if adhoc_session_id:
+            qs = qs.filter(ad_hoc_session_id=adhoc_session_id)
         if student_id:
             qs = qs.filter(student_id=student_id)
         if status_param:
@@ -1043,9 +1512,85 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         # A staff edit supersedes any previous campus check-in auto-mark.
         serializer.save(auto_marked_by_checkin=None)
 
+    @extend_schema(
+        summary="Bulk upsert ad-hoc session attendance",
+        description=(
+            "Create or update ad-hoc attendance rows in one request. "
+            "Preferred body: `{\"records\":[…]}`. A bare JSON list is accepted as a fallback. "
+            "Canonical record fields: `adhoc_session_id`, `student_id`, `status` "
+            "(present|absent|late|excused). "
+            "Aliases `ad_hoc_session_id` / `adhoc_session` / `ad_hoc_session` / `student` remain accepted. "
+            "Client canonical name is `adhoc_session_id`; the model FK remains `ad_hoc_session` / `ad_hoc_session_id`."
+        ),
+        request={
+            'application/json': {
+                'oneOf': [
+                    {
+                        'type': 'object',
+                        'properties': {
+                            'records': {
+                                'type': 'array',
+                                'items': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'adhoc_session_id': {'type': 'integer'},
+                                        'student_id': {'type': 'integer'},
+                                        'status': {
+                                            'type': 'string',
+                                            'enum': ['present', 'absent', 'late', 'excused'],
+                                        },
+                                    },
+                                    'required': ['adhoc_session_id', 'student_id'],
+                                },
+                            },
+                        },
+                        'required': ['records'],
+                    },
+                    {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'adhoc_session_id': {'type': 'integer'},
+                                'student_id': {'type': 'integer'},
+                                'status': {
+                                    'type': 'string',
+                                    'enum': ['present', 'absent', 'late', 'excused'],
+                                },
+                            },
+                            'required': ['adhoc_session_id', 'student_id'],
+                        },
+                    },
+                ],
+            },
+        },
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'created_count': {'type': 'integer'},
+                    'updated_count': {'type': 'integer'},
+                },
+                'required': ['created_count', 'updated_count'],
+            },
+            400: OpenApiResponse(description="Invalid body or status"),
+        },
+        examples=[
+            OpenApiExample(
+                'Preferred records wrapper',
+                value={
+                    'records': [
+                        {'adhoc_session_id': 1, 'student_id': 2, 'status': 'present'},
+                    ]
+                },
+                request_only=True,
+            ),
+        ],
+    )
     @action(detail=False, methods=['post'])
     def bulk_upsert(self, request):
-        records = request.data.get('records', request.data)
+        data = request.data
+        records = data if isinstance(data, list) else data.get('records', data)
         if not isinstance(records, list):
             return Response({'error': 'Expected a list of adhoc attendance records'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1054,7 +1599,12 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         session_ids = set()
         student_ids = set()
         for r in records:
-            s_id = r.get('ad_hoc_session_id') or r.get('adhoc_session_id') or r.get('ad_hoc_session') or r.get('adhoc_session')
+            s_id = (
+                r.get('adhoc_session_id')
+                or r.get('ad_hoc_session_id')
+                or r.get('adhoc_session')
+                or r.get('ad_hoc_session')
+            )
             st_id = r.get('student_id') or r.get('student')
             if s_id: session_ids.add(int(s_id))
             if st_id: student_ids.add(int(st_id))
@@ -1069,7 +1619,12 @@ class AdHocSessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         
         with transaction.atomic():
             for r in records:
-                s_id = r.get('ad_hoc_session_id') or r.get('adhoc_session_id') or r.get('ad_hoc_session') or r.get('adhoc_session')
+                s_id = (
+                    r.get('adhoc_session_id')
+                    or r.get('ad_hoc_session_id')
+                    or r.get('adhoc_session')
+                    or r.get('ad_hoc_session')
+                )
                 st_id = r.get('student_id') or r.get('student')
                 if not s_id or not st_id:
                     continue

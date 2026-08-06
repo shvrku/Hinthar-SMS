@@ -163,6 +163,7 @@ Unbounded list UIs must also support server-side search (`q`) and structured fil
 |----------|--------|
 | `GET /attendance/matrix/` | Scoped aggregate; size bounded by filters |
 | `GET /adhoc-attendance/matrix/` | Same |
+| `GET /check-ins/overview/` | Scoped aggregate; class/summary bounded; search + `class_id=all` paginated |
 | `GET /stats/` | Fixed small payload |
 | `GET /me/` | Single object |
 | Small catalogs optionally | subjects / classes — may stay unpaginated **or** paginated for consistency |
@@ -194,9 +195,17 @@ Pick **one canonical name** per filter in new code:
 |-----------|----------------------------------------|
 | `class_id` | `class_obj_id` (internal FK may remain `class_obj`) |
 | `date_from` / `date_to` | `start_date` / `end_date` |
-| `adhoc_session_id` | `ad_hoc_session_id` |
+| `adhoc_session_id` | `ad_hoc_session_id` (model FK remains `ad_hoc_session` / `ad_hoc_session_id`) |
 
 Document aliases in OpenAPI `deprecated=True` until removed.
+
+**`class_id` is canonical** on:
+
+- `GET /session-attendances/` (filters `session__class_obj_id`; `class_obj_id` alias)
+- `GET /class-students/` (filters enrollment `class_obj_id`; `class_obj_id` alias)
+- `GET /sessions/` and matrix/overview aggregates (already documented)
+
+Clients should send `class_id`; servers may still accept `class_obj_id` during the alias window.
 
 ---
 
@@ -208,14 +217,16 @@ Shared mixin: `people.views.BulkOperationsMixin` (keep as the single implementat
 |--------|--------|------|------|----------|
 | Bulk create | `POST` | `/resource/bulk_create/` | `{"items":[…]}` or `[…]` | `{created_count, items}` `201` |
 | Bulk delete | `DELETE` | `/resource/bulk_delete/` | `{"ids":[…]}` | `{deleted_count, deleted_ids}` `200` |
-| Bulk upsert | `POST` | `/resource/bulk_upsert/` | `{"records":[…]}` or `[…]` | `{created_count, updated_count}` `200` |
+| Bulk upsert | `POST` | `/resource/bulk_upsert/` | Prefer `{"records":[…]}`; bare `[…]` fallback | `{created_count, updated_count}` `200` |
 
 Rules:
 
+- Prefer `{"records":[…]}` for bulk upsert request bodies; accept a bare list only as a temporary client fallback.
 - Always wrap writes in `transaction.atomic()`.
 - Validate with the same serializer as create/update where possible.
 - Block deletes that violate business rules (document any remaining locks in the action docstring).
 - Bulk upsert is **attendance-only** unless a new domain proves the same pattern.
+- Ad-hoc attendance records use client field **`adhoc_session_id`** (aliases `ad_hoc_session_id` / nested keys may be accepted in code). The model FK remains `ad_hoc_session` / `ad_hoc_session_id`.
 
 ---
 
@@ -284,6 +295,84 @@ Filters: `subject_id`, `teacher_id`, `date_from`/`date_to`, `month`/`year`.
 
 Do **not** fall back to “all students in the school” when no rows match — return empty `students: []`.
 
+### Check-in overview aggregate
+
+```
+GET /api/v1/check-ins/overview/
+```
+
+Server-side aggregate for the campus check-in overview so the client never pulls
+whole tables (`students`, `class-students`, `check-ins`) and filters in the
+browser. `IsStaffOrAbove`. All modes are scoped to a single day via `date`
+(`YYYY-MM-DD`, defaults to server local date). Three mutually exclusive modes,
+chosen by query params (checked in this order):
+
+| Params | `mode` | Returns |
+|--------|--------|---------|
+| `search=<text>` | `search` | Paginated student matches (`name`/`unique_code` `icontains`) across **all** classes; each row has `student_id`, `name`, `unique_code`, `class_id`, `class_label`, and that day's `check_in` (or `null`). Envelope: `count`, `page`, `page_size`, `num_pages`, `results`. `page_size` default 50, max 200. |
+| `class_id=all` | `school` | Paginated unique students across every class. Full-day `arrived`/`total` always returned. Optional `status=missing\|arrived` filters one column for the dual Missing / Checked-in UI (each side paginated independently). Envelope: `count`, `page`, `page_size`, `num_pages`, `students[]` with `class_id`/`class_label` + `check_in`\|`null`; echoes `status` when filtered. Same page defaults as search. |
+| `class_id=<int>` | `class` | One class roster joined to the day's status: `class`, `arrived`, `total`, `students[]` (`id`, `name`, `unique_code`, `check_in`\|`null`). Unknown id → 404. Unpaginated (bounded by class size). |
+| _(none)_ | `classes` | Lightweight picker summary: `classes[]` with `id`, `label`, `arrived`, `total` per class (ordered by level then cohort). |
+
+`check_in` is `null` or `{ id, timestamp, check_in_type }`. Campus presence only —
+independent of lesson attendance (`/attendance/matrix/`). Invalid `date`,
+`class_id`, `status`, `page`, or `page_size` → 400.
+
+### Student attendance summary aggregate
+
+```
+GET /api/v1/students/{id}/attendance-summary/?range=week|month|all
+```
+
+Staff+ only. Scoped to one student and a preset window (`week` = Mon–today local,
+`month` = month start–today, `all` = enrollment_date–today). Returns campus
+check-in and lesson roll **as separate objects** — never a single blended rate.
+
+Shape (conceptual):
+
+```json
+{
+  "range": "month",
+  "date_from": "2026-08-01",
+  "date_to": "2026-08-06",
+  "campus": {
+    "days_in_range": 6,
+    "days_checked_in": 4,
+    "rate": 0.666…,
+    "daily": [{"date": "…", "checked_in": true}]
+  },
+  "lesson": {
+    "total_sessions": 12,
+    "present": 8,
+    "late": 1,
+    "absent": 2,
+    "excused": 1,
+    "rate_attended": 0.818…,
+    "by_status": [{"status": "present", "count": 8}],
+    "by_class": [{"class_id": 1, "class_label": "…", "present": …, "total": …}],
+    "trend": [{"date": "…", "present": 1, "late": 0, "absent": 0, "excused": 0}]
+  }
+}
+```
+
+Invalid / missing `range` → **400** `{"error": "range must be one of: …"}`.
+
+### Student check-in QR token lifecycle
+
+| Action | Method / path | Notes |
+|--------|---------------|--------|
+| Read token | `GET /students/{id}/check_in_token/` | Owner student, staff, or admin |
+| Regenerate | `POST /students/{id}/regenerate_check_in_token/` | Staff+; returns new token and sets `check_in_token_active: true` |
+| Activate | `POST /students/{id}/activate_check_in_token/` | Staff+; `{ "check_in_token_active": true }` |
+| Deactivate | `POST /students/{id}/deactivate_check_in_token/` | Staff+; soft-disable without rotating secret |
+
+`Student.check_in_token_active` defaults to `true`. Inactive tokens:
+
+- `POST /check-ins/qr/` → **403** `{"error": "Check-in token is deactivated"}`
+- `POST /check-ins/lookup/` (token path) → **403** with `error` **and** a safe nested `student` summary for the terminal confirmation card (`id`, `name`, `unique_code`, `class_name`, `checked_in_today`, `method`, `check_in_token_active: false`). Never returns the raw token.
+
+Student list/detail serializers expose `check_in_token_active` only to staff/admin (same visibility rules as the token itself).
+
 ### When to add a new matrix / overview route
 
 Add a dedicated aggregate route when:
@@ -298,24 +387,29 @@ Suggested future routes (if product needs them):
 |-------|--------|
 | `GET /attendance/matrix/` | Class lesson roll (exists) |
 | `GET /adhoc-attendance/matrix/` | Tutoring roll (exists) |
-| `GET /check-ins/overview/` | Daily campus presence by class/date (today assembled client-side) |
+| `GET /check-ins/overview/` | Daily campus presence by class/date + school-wide search (**implemented**, see above) |
+| `GET /students/{id}/attendance-summary/` | Per-student campus + lesson analytics (**implemented**, see above) |
+| `GET /classes/{id}/attendance-summary/` | Per-class lesson analytics (planned) |
 | `GET /attendance/session/{id}/roster/` | Single-session roster + statuses (optional split from matrix) |
 
 ---
 
 ## 6. Error & response conventions
 
+**Error freeze (this cycle):** domain handlers return `{"error": "…"}` plus an optional nested safe context object when the UI needs it (e.g. deactivated QR lookup `student`). DRF field validation errors stay as DRF’s default shape. **No global exception handler** this cycle — do not invent new top-level keys beyond `error` / DRF norms / documented nested context.
+
 | Situation | Status | Body |
 |-----------|--------|------|
 | Validation | 400 | DRF field errors or `{"error": "…"}` for non-field |
 | Auth missing | 401 | DRF default |
 | Forbidden role | 403 | DRF default |
+| Domain forbid (e.g. deactivated QR) | 403 | `{"error": "…"}`; may include a **safe** nested context object (e.g. `student`) for UI — never secrets |
 | Not found | 404 | DRF default |
 | Conflict (e.g. duplicate check-in) | 409 | `{"error": "…"}` |
 | Success create | 201 | Object or bulk payload |
 | Success other | 200 | Object / envelope / aggregate |
 
-Prefer one global exception handler later for a uniform `{detail, code, fields?}` shape; until then, do not invent new top-level keys beyond `error` / DRF norms.
+A uniform `{detail, code, fields?}` global handler remains deferred to a later hygiene pass.
 
 ---
 

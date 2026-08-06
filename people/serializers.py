@@ -57,8 +57,11 @@ class StudentSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Student
-        fields = ['id', 'unique_code', 'exam_candidate_number', 'name', 'dob', 'enrollment_date', 'contact', 'school_code', 'user_id', 'check_in_token']
-        read_only_fields = ['unique_code', 'check_in_token']
+        fields = [
+            'id', 'unique_code', 'exam_candidate_number', 'name', 'dob', 'enrollment_date',
+            'contact', 'school_code', 'user_id', 'check_in_token', 'check_in_token_active',
+        ]
+        read_only_fields = ['unique_code', 'check_in_token', 'check_in_token_active']
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -69,8 +72,10 @@ class StudentSerializer(serializers.ModelSerializer):
             is_privileged = user.role in ('admin', 'staff')
             if not (is_owner or is_privileged):
                 representation.pop('check_in_token', None)
+                representation.pop('check_in_token_active', None)
         else:
             representation.pop('check_in_token', None)
+            representation.pop('check_in_token_active', None)
         return representation
 
 class StaffSerializer(serializers.ModelSerializer):

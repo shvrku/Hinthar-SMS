@@ -7,13 +7,14 @@ from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework import status
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 from people.serializers import (
     UserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
 from people.models import Subject, Teacher, Student, Staff, AuditLog
 from people.permissions import IsAdmin, IsStaffOrAbove, IsStudentOwnerOrStaffOrAdmin
 from people.roles import ROLE_RANK
+from people.student_analytics import VALID_RANGES, build_student_attendance_summary
 
 User = get_user_model()
 
@@ -159,13 +160,76 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         self.check_object_permissions(request, student)
         return Response({'check_in_token': student.check_in_token})
 
+    @extend_schema(
+        summary='Regenerate student check-in QR token',
+        description='Staff+. Rotates the secret and sets check_in_token_active=true.',
+    )
     @action(detail=True, methods=['post'],
             permission_classes=[IsStaffOrAbove])
     def regenerate_check_in_token(self, request, pk=None):
         """Regenerate a student's check-in token. Staff or admin only."""
         student = self.get_object()
         student.regenerate_check_in_token()
-        return Response({'check_in_token': student.check_in_token})
+        return Response({
+            'check_in_token': student.check_in_token,
+            'check_in_token_active': student.check_in_token_active,
+        })
+
+    @extend_schema(
+        summary='Activate student check-in QR token',
+        description='Staff+. Soft-enables an existing token without rotating it.',
+    )
+    @action(detail=True, methods=['post'], url_path='activate_check_in_token',
+            permission_classes=[IsStaffOrAbove])
+    def activate_check_in_token(self, request, pk=None):
+        student = self.get_object()
+        if not student.check_in_token_active:
+            student.check_in_token_active = True
+            student.save(update_fields=['check_in_token_active'])
+        return Response({'check_in_token_active': True})
+
+    @extend_schema(
+        summary='Deactivate student check-in QR token',
+        description='Staff+. Soft-disables QR check-in without rotating the secret.',
+    )
+    @action(detail=True, methods=['post'], url_path='deactivate_check_in_token',
+            permission_classes=[IsStaffOrAbove])
+    def deactivate_check_in_token(self, request, pk=None):
+        student = self.get_object()
+        if student.check_in_token_active:
+            student.check_in_token_active = False
+            student.save(update_fields=['check_in_token_active'])
+        return Response({'check_in_token_active': False})
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'range',
+                OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Preset window: week | month | all (since enrollment)',
+                enum=sorted(VALID_RANGES),
+            ),
+        ],
+        summary='Student campus + lesson attendance summary',
+        description=(
+            'Staff+. Campus check-in and lesson roll are returned as separate objects. '
+            'Never blend them into a single rate.'
+        ),
+    )
+    @action(detail=True, methods=['get'], url_path='attendance-summary',
+            permission_classes=[IsStaffOrAbove])
+    def attendance_summary(self, request, pk=None):
+        student = self.get_object()
+        range_key = (request.query_params.get('range') or '').strip().lower()
+        if range_key not in VALID_RANGES:
+            return Response(
+                {'error': f'range must be one of: {", ".join(sorted(VALID_RANGES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        payload = build_student_attendance_summary(student, range_key)
+        return Response(payload)
 
 
 class StaffViewSet(BulkOperationsMixin, ModelViewSet):

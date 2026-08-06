@@ -440,3 +440,496 @@ class CheckInCorrectionTests(APITestCase):
         self.assertEqual(adhoc_auto.status, 'absent')
         self.assertIsNone(adhoc_auto.auto_marked_by_checkin_id)
 
+
+class CheckInOverviewAggregateTests(APITestCase):
+    """Server-side aggregate for /check-ins/overview/ (class / search / summary modes)."""
+
+    URL = "/api/v1/check-ins/overview/"
+
+    def setUp(self):
+        from timetable.models import Class, ClassStudent
+
+        self.client = APIClient()
+        self.staff = User.objects.create_user(
+            username="staff_overview", role="staff", clerk_id="clerk_staff_ov_1"
+        )
+        self.terminal = User.objects.create_user(
+            username="terminal_overview", role="terminal", clerk_id="clerk_term_ov_1"
+        )
+        self.today = timezone.localdate()
+
+        self.class_a = Class.objects.create(education_level="Year7", cohort_identifier="A")
+        self.class_b = Class.objects.create(education_level="Year8", cohort_identifier="B")
+
+        self.arrived_student = Student.objects.create(name="Alice Arrived", check_in_token="ov_alice")
+        self.missing_student = Student.objects.create(name="Bob Missing", check_in_token="ov_bob")
+        self.other_class_student = Student.objects.create(name="Cara Other", check_in_token="ov_cara")
+
+        ClassStudent.objects.create(class_obj=self.class_a, student=self.arrived_student)
+        ClassStudent.objects.create(class_obj=self.class_a, student=self.missing_student)
+        ClassStudent.objects.create(class_obj=self.class_b, student=self.other_class_student)
+
+        # Alice checked in today; Bob did not.
+        self.checkin = CheckIn.objects.create(
+            student=self.arrived_student, check_in_type="qr", date=self.today
+        )
+
+    def test_requires_staff(self):
+        self.client.force_authenticate(user=self.terminal)
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_classes_summary_mode(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(self.URL, {"date": self.today.isoformat()})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["mode"], "classes")
+        summary = {row["id"]: row for row in response.data["classes"]}
+        self.assertEqual(summary[self.class_a.id]["total"], 2)
+        self.assertEqual(summary[self.class_a.id]["arrived"], 1)
+        self.assertEqual(summary[self.class_b.id]["total"], 1)
+        self.assertEqual(summary[self.class_b.id]["arrived"], 0)
+
+    def test_class_roster_mode(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL, {"date": self.today.isoformat(), "class_id": self.class_a.id}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["mode"], "class")
+        self.assertEqual(response.data["total"], 2)
+        self.assertEqual(response.data["arrived"], 1)
+        by_id = {s["id"]: s for s in response.data["students"]}
+        self.assertIsNotNone(by_id[self.arrived_student.id]["check_in"])
+        self.assertEqual(by_id[self.arrived_student.id]["check_in"]["check_in_type"], "qr")
+        self.assertIsNone(by_id[self.missing_student.id]["check_in"])
+
+    def test_class_roster_unknown_class_404(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(self.URL, {"class_id": 999999})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_school_wide_roster_mode(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL, {"date": self.today.isoformat(), "class_id": "all"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["mode"], "school")
+        self.assertEqual(response.data["total"], 3)
+        self.assertEqual(response.data["arrived"], 1)
+        self.assertEqual(response.data["count"], 3)
+        self.assertEqual(response.data["page"], 1)
+        self.assertEqual(response.data["page_size"], 50)
+        self.assertEqual(response.data["num_pages"], 1)
+        by_id = {s["id"]: s for s in response.data["students"]}
+        self.assertIn("class_label", by_id[self.arrived_student.id])
+        self.assertIsNotNone(by_id[self.arrived_student.id]["check_in"])
+        self.assertIsNone(by_id[self.missing_student.id]["check_in"])
+        self.assertIsNone(by_id[self.other_class_student.id]["check_in"])
+
+    def test_school_wide_pagination(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL,
+            {
+                "date": self.today.isoformat(),
+                "class_id": "all",
+                "page": 1,
+                "page_size": 1,
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["mode"], "school")
+        self.assertEqual(response.data["total"], 3)
+        self.assertEqual(response.data["arrived"], 1)
+        self.assertEqual(response.data["count"], 3)
+        self.assertEqual(response.data["page_size"], 1)
+        self.assertEqual(len(response.data["students"]), 1)
+        self.assertEqual(response.data["num_pages"], 3)
+
+        page_two = self.client.get(
+            self.URL,
+            {
+                "date": self.today.isoformat(),
+                "class_id": "all",
+                "page": 2,
+                "page_size": 1,
+            },
+        )
+        self.assertEqual(len(page_two.data["students"]), 1)
+        self.assertNotEqual(
+            response.data["students"][0]["id"],
+            page_two.data["students"][0]["id"],
+        )
+
+    def test_school_wide_status_missing_and_arrived(self):
+        self.client.force_authenticate(user=self.staff)
+        missing = self.client.get(
+            self.URL,
+            {
+                "date": self.today.isoformat(),
+                "class_id": "all",
+                "status": "missing",
+            },
+        )
+        self.assertEqual(missing.status_code, status.HTTP_200_OK)
+        self.assertEqual(missing.data["status"], "missing")
+        self.assertEqual(missing.data["count"], 2)
+        self.assertEqual(missing.data["arrived"], 1)
+        self.assertEqual(missing.data["total"], 3)
+        self.assertTrue(all(row["check_in"] is None for row in missing.data["students"]))
+
+        arrived = self.client.get(
+            self.URL,
+            {
+                "date": self.today.isoformat(),
+                "class_id": "all",
+                "status": "arrived",
+            },
+        )
+        self.assertEqual(arrived.data["status"], "arrived")
+        self.assertEqual(arrived.data["count"], 1)
+        self.assertEqual(len(arrived.data["students"]), 1)
+        self.assertIsNotNone(arrived.data["students"][0]["check_in"])
+        self.assertEqual(arrived.data["students"][0]["id"], self.arrived_student.id)
+
+    def test_school_wide_invalid_status_400(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL,
+            {"class_id": "all", "status": "late"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_search_mode_matches_across_classes(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL, {"date": self.today.isoformat(), "search": "Cara"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["mode"], "search")
+        self.assertEqual(response.data["count"], 1)
+        row = response.data["results"][0]
+        self.assertEqual(row["student_id"], self.other_class_student.id)
+        self.assertEqual(row["class_id"], self.class_b.id)
+        self.assertIsNone(row["check_in"])
+
+    def test_search_mode_matches_unique_code_and_status(self):
+        self.arrived_student.refresh_from_db()
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL,
+            {"date": self.today.isoformat(), "search": self.arrived_student.unique_code},
+        )
+        self.assertEqual(response.data["count"], 1)
+        row = response.data["results"][0]
+        self.assertEqual(row["student_id"], self.arrived_student.id)
+        self.assertIsNotNone(row["check_in"])
+
+    def test_search_pagination(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.URL, {"search": "a", "page": 1, "page_size": 1}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["page_size"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertGreaterEqual(response.data["count"], 2)
+        self.assertGreaterEqual(response.data["num_pages"], 2)
+
+    def test_invalid_date_returns_400(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(self.URL, {"date": "not-a-date"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class SessionAttendanceBulkUpsertTests(APITestCase):
+    URL = "/api/v1/session-attendances/bulk_upsert/"
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="bulk_att_admin", role="admin", clerk_id="clerk_bulk_att_1"
+        )
+        from timetable.models import Class, TimetableSlot
+        from people.models import Teacher, Subject
+
+        self.class_obj = Class.objects.create(education_level="IG", cohort_identifier="B")
+        self.teacher = Teacher.objects.create(name="Bulk Att Teacher")
+        self.subject = Subject.objects.create(name="Bulk Att Subject")
+        self.student_a = Student.objects.create(name="Bulk Att A")
+        self.student_b = Student.objects.create(name="Bulk Att B")
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=0,
+            start_time="09:00",
+            end_time="10:00",
+        )
+        today = timezone.localdate()
+        self.session = Session.objects.create(
+            timetable_slot=self.slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(
+                datetime.combine(today, datetime.min.time().replace(hour=9, minute=0))
+            ),
+            end_time=timezone.make_aware(
+                datetime.combine(today, datetime.min.time().replace(hour=10, minute=0))
+            ),
+        )
+
+    def test_bulk_upsert_create_with_records_wrapper(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.URL,
+            {
+                "records": [
+                    {
+                        "session_id": self.session.id,
+                        "student_id": self.student_a.id,
+                        "status": "present",
+                    },
+                    {
+                        "session_id": self.session.id,
+                        "student_id": self.student_b.id,
+                        "status": "absent",
+                    },
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["created_count"], 2)
+        self.assertEqual(response.data["updated_count"], 0)
+        self.assertEqual(
+            SessionAttendance.objects.get(
+                session=self.session, student=self.student_a
+            ).status,
+            "present",
+        )
+
+    def test_bulk_upsert_update_existing(self):
+        SessionAttendance.objects.create(
+            session=self.session, student=self.student_a, status="absent"
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.URL,
+            [
+                {
+                    "session_id": self.session.id,
+                    "student_id": self.student_a.id,
+                    "status": "late",
+                }
+            ],
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["created_count"], 0)
+        self.assertEqual(response.data["updated_count"], 1)
+        self.assertEqual(
+            SessionAttendance.objects.get(
+                session=self.session, student=self.student_a
+            ).status,
+            "late",
+        )
+
+    def test_bulk_upsert_invalid_status(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.URL,
+            {
+                "records": [
+                    {
+                        "session_id": self.session.id,
+                        "student_id": self.student_a.id,
+                        "status": "not-a-status",
+                    }
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("error", response.data)
+        self.assertFalse(
+            SessionAttendance.objects.filter(
+                session=self.session, student=self.student_a
+            ).exists()
+        )
+
+
+class AdHocSessionAttendanceBulkUpsertTests(APITestCase):
+    URL = "/api/v1/adhoc-session-attendances/bulk_upsert/"
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="bulk_adhoc_admin", role="admin", clerk_id="clerk_bulk_adhoc_1"
+        )
+        from people.models import Teacher, Subject
+
+        self.teacher = Teacher.objects.create(name="Bulk Adhoc Teacher")
+        self.subject = Subject.objects.create(name="Bulk Adhoc Subject")
+        self.student_a = Student.objects.create(name="Bulk Adhoc A")
+        self.student_b = Student.objects.create(name="Bulk Adhoc B")
+        self.adhoc = AdHocSession.objects.create(
+            teacher=self.teacher,
+            subject=self.subject,
+            date=timezone.localdate(),
+            start_time="14:00",
+            end_time="15:00",
+        )
+
+    def test_bulk_upsert_create_with_records_wrapper(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.URL,
+            {
+                "records": [
+                    {
+                        "adhoc_session_id": self.adhoc.id,
+                        "student_id": self.student_a.id,
+                        "status": "present",
+                    },
+                    {
+                        "adhoc_session_id": self.adhoc.id,
+                        "student_id": self.student_b.id,
+                        "status": "excused",
+                    },
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["created_count"], 2)
+        self.assertEqual(response.data["updated_count"], 0)
+        self.assertEqual(
+            AdHocSessionAttendance.objects.get(
+                ad_hoc_session=self.adhoc, student=self.student_a
+            ).status,
+            "present",
+        )
+
+    def test_bulk_upsert_update_existing(self):
+        AdHocSessionAttendance.objects.create(
+            ad_hoc_session=self.adhoc, student=self.student_a, status="absent"
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.URL,
+            [
+                {
+                    "adhoc_session_id": self.adhoc.id,
+                    "student_id": self.student_a.id,
+                    "status": "late",
+                }
+            ],
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["created_count"], 0)
+        self.assertEqual(response.data["updated_count"], 1)
+        self.assertEqual(
+            AdHocSessionAttendance.objects.get(
+                ad_hoc_session=self.adhoc, student=self.student_a
+            ).status,
+            "late",
+        )
+
+    def test_bulk_upsert_invalid_status(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            self.URL,
+            {
+                "records": [
+                    {
+                        "adhoc_session_id": self.adhoc.id,
+                        "student_id": self.student_a.id,
+                        "status": "nope",
+                    }
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("error", response.data)
+        self.assertFalse(
+            AdHocSessionAttendance.objects.filter(
+                ad_hoc_session=self.adhoc, student=self.student_a
+            ).exists()
+        )
+
+
+class PageBoundaryListTests(APITestCase):
+    """page_size=2 → page1/page2 disjoint IDs, stable count on hot list ViewSets."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="page_bound_admin", role="admin", clerk_id="clerk_page_bound_1"
+        )
+        from timetable.models import Class, TimetableSlot
+        from people.models import Teacher, Subject
+
+        self.class_obj = Class.objects.create(education_level="IG", cohort_identifier="P")
+        self.teacher = Teacher.objects.create(name="Page Bound Teacher")
+        self.subject = Subject.objects.create(name="Page Bound Subject")
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=2,
+            start_time="11:00",
+            end_time="12:00",
+        )
+        base = date(2026, 8, 1)
+        self.sessions = []
+        for i in range(5):
+            d = base + timedelta(days=i)
+            self.sessions.append(
+                Session.objects.create(
+                    timetable_slot=self.slot,
+                    teacher=self.teacher,
+                    class_obj=self.class_obj,
+                    start_time=timezone.make_aware(
+                        datetime.combine(d, datetime.min.time().replace(hour=11))
+                    ),
+                    end_time=timezone.make_aware(
+                        datetime.combine(d, datetime.min.time().replace(hour=12))
+                    ),
+                )
+            )
+        self.students = [
+            Student.objects.create(name=f"Page Bound Student {i}") for i in range(5)
+        ]
+        for i, student in enumerate(self.students):
+            CheckIn.objects.create(
+                student=student,
+                date=base + timedelta(days=i),
+                check_in_type="manual",
+                checked_by=self.admin,
+            )
+
+    def _assert_page_boundary(self, url):
+        self.client.force_authenticate(user=self.admin)
+        page1 = self.client.get(url, {"page": 1, "page_size": 2})
+        page2 = self.client.get(url, {"page": 2, "page_size": 2})
+        self.assertEqual(page1.status_code, status.HTTP_200_OK, msg=url)
+        self.assertEqual(page2.status_code, status.HTTP_200_OK, msg=url)
+        self.assertEqual(page1.data["count"], page2.data["count"], msg=url)
+        self.assertGreaterEqual(page1.data["count"], 4, msg=url)
+        self.assertEqual(len(page1.data["results"]), 2, msg=url)
+        self.assertEqual(len(page2.data["results"]), 2, msg=url)
+        ids1 = {row["id"] for row in page1.data["results"]}
+        ids2 = {row["id"] for row in page2.data["results"]}
+        self.assertTrue(ids1.isdisjoint(ids2), msg=f"{url}: {ids1} vs {ids2}")
+
+    def test_sessions_page_boundary(self):
+        self._assert_page_boundary("/api/v1/sessions/")
+
+    def test_check_ins_page_boundary(self):
+        self._assert_page_boundary("/api/v1/check-ins/")
+

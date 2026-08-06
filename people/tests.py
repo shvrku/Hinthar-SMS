@@ -17,8 +17,11 @@ class StudentModelTest(TestCase):
         """Test that regenerating check-in token updates the database."""
         student = Student.objects.create(name="Test Student")
         old_token = student.check_in_token
+        student.check_in_token_active = False
+        student.save(update_fields=['check_in_token_active'])
         student.regenerate_check_in_token()
         self.assertNotEqual(student.check_in_token, old_token)
+        self.assertTrue(student.check_in_token_active)
 
 
 from django.contrib.auth.models import AnonymousUser
@@ -167,5 +170,50 @@ class SchoolCodeValidationTest(TestCase):
     def test_staff_school_code_required(self):
         serializer = StaffSerializer(data={'name': 'Staff Test', 'school_code': 'YWM'})
         self.assertTrue(serializer.is_valid())
+
+
+from rest_framework import status
+from rest_framework.test import APITestCase, APIClient
+
+
+class PeoplePageBoundaryListTests(APITestCase):
+    """page_size=2 → page1/page2 disjoint IDs, stable count for people lists."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="people_page_admin", role="admin", clerk_id="clerk_people_page_1"
+        )
+        for i in range(5):
+            Student.objects.create(name=f"Page Student {i}")
+            Teacher.objects.create(name=f"Page Teacher {i}")
+            User.objects.create_user(
+                username=f"page_user_{i}",
+                role="staff",
+                clerk_id=f"clerk_people_page_u_{i}",
+            )
+
+    def _assert_page_boundary(self, url):
+        self.client.force_authenticate(user=self.admin)
+        page1 = self.client.get(url, {"page": 1, "page_size": 2})
+        page2 = self.client.get(url, {"page": 2, "page_size": 2})
+        self.assertEqual(page1.status_code, status.HTTP_200_OK, msg=url)
+        self.assertEqual(page2.status_code, status.HTTP_200_OK, msg=url)
+        self.assertEqual(page1.data["count"], page2.data["count"], msg=url)
+        self.assertGreaterEqual(page1.data["count"], 4, msg=url)
+        self.assertEqual(len(page1.data["results"]), 2, msg=url)
+        self.assertEqual(len(page2.data["results"]), 2, msg=url)
+        ids1 = {row["id"] for row in page1.data["results"]}
+        ids2 = {row["id"] for row in page2.data["results"]}
+        self.assertTrue(ids1.isdisjoint(ids2), msg=f"{url}: {ids1} vs {ids2}")
+
+    def test_students_page_boundary(self):
+        self._assert_page_boundary("/api/v1/students/")
+
+    def test_teachers_page_boundary(self):
+        self._assert_page_boundary("/api/v1/teachers/")
+
+    def test_users_page_boundary(self):
+        self._assert_page_boundary("/api/v1/users/")
 
 

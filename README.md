@@ -72,10 +72,21 @@ See [`docs/SCALING_IMPLEMENTATION_PLAN.md`](docs/SCALING_IMPLEMENTATION_PLAN.md)
 - [x] Check-in correction UI (`DELETE /check-ins/{id}/` + `/check-in/corrections`)
 - [ ] Check-in overview redesign (class-first, checked-in / missing)
 - [ ] QR token activate / deactivate
-- [ ] OpenAPI / bulk hygiene (Phase 5)
+- [x] OpenAPI / bulk hygiene (Phase 5) — global exception handler deferred
 - [ ] Teacher queryset scoping
 - [ ] Analytics aggregates — future
 - [ ] Academic records (exams / results) — future
+
+
+## OpenAPI schema
+
+Interactive docs: `/api/v1/docs/` (Swagger UI).
+
+Regenerate the checked-in schema file when the environment has DB settings available:
+
+```bash
+python manage.py spectacular --file docs/openapi-schema.yml
+```
 
 
 
