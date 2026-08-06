@@ -321,6 +321,37 @@ class SessionFilterTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
 
+    def test_session_list_filter_by_timetable_slot_id(self):
+        from timetable.models import TimetableSlot
+
+        self.client.force_authenticate(user=self.user)
+        other_slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=2,
+            start_time="12:00",
+            end_time="13:00",
+        )
+        d2 = date(2026, 7, 14)
+        Session.objects.create(
+            timetable_slot=other_slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(
+                datetime.combine(d2, datetime.min.time().replace(hour=12, minute=0))
+            ),
+            end_time=timezone.make_aware(
+                datetime.combine(d2, datetime.min.time().replace(hour=13, minute=0))
+            ),
+        )
+        response = self.client.get(
+            f"/api/v1/sessions/?timetable_slot_id={self.slot.id}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], self.session1.id)
+
 
 class CheckInCorrectionTests(APITestCase):
     """Staff can delete a campus check-in to undo a mis-tap."""

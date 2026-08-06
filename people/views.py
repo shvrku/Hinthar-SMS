@@ -15,6 +15,7 @@ from people.models import Subject, Teacher, Student, Staff, AuditLog
 from people.permissions import IsAdmin, IsStaffOrAbove, IsStudentOwnerOrStaffOrAdmin
 from people.roles import ROLE_RANK
 from people.student_analytics import VALID_RANGES, build_student_attendance_summary
+from people.teacher_analytics import build_teacher_attendance_summary
 
 User = get_user_model()
 
@@ -118,6 +119,35 @@ class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
     @action(detail=False, methods=['post'])
     def bulk_create(self, request):
         return super().bulk_create(request)
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'range',
+                OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Preset window: week | month | all',
+                enum=sorted(VALID_RANGES),
+            ),
+        ],
+        summary='Teacher accountability + personal attendance summary',
+        description=(
+            'Staff+. Accountability = student roll marks for sessions this teacher taught '
+            '(assigned or actual). Personal = derived from session status + assigned vs actual_teacher.'
+        ),
+    )
+    @action(detail=True, methods=['get'], url_path='attendance-summary',
+            permission_classes=[IsStaffOrAbove])
+    def attendance_summary(self, request, pk=None):
+        teacher = self.get_object()
+        range_key = (request.query_params.get('range') or '').strip().lower()
+        if range_key not in VALID_RANGES:
+            return Response(
+                {'error': f'range must be one of: {", ".join(sorted(VALID_RANGES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(build_teacher_attendance_summary(teacher, range_key))
 
 
 class StudentViewSet(BulkOperationsMixin, ModelViewSet):

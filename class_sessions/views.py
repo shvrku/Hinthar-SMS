@@ -40,7 +40,7 @@ def revert_checkin_auto_attendance(checkin_ids):
 
 class SessionViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Session.objects.select_related(
-        'teacher__user', 'class_obj',
+        'teacher__user', 'actual_teacher__user', 'class_obj',
         'timetable_slot__class_obj', 'timetable_slot__subject',
         'timetable_slot__teacher__user',
     ).prefetch_related('attendances').order_by('id')
@@ -64,6 +64,9 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(teacher_id=teacher_id)
         if class_id:
             qs = qs.filter(class_obj_id=class_id)
+        timetable_slot_id = self.request.query_params.get('timetable_slot_id')
+        if timetable_slot_id:
+            qs = qs.filter(timetable_slot_id=timetable_slot_id)
         if subject_id:
             qs = qs.filter(timetable_slot__subject_id=subject_id)
         if date_from:
@@ -424,8 +427,8 @@ class GenerateClassSessionsView(APIView):
                 'timetable_slot_id': session.timetable_slot_id,
                 'teacher_id': session.teacher_id,
                 'class_obj_id': session.class_obj_id,
-                'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
-                'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
+                'start_time': session.start_time.isoformat(),
+                'end_time': session.end_time.isoformat(),
                 'status': session.status,
             }
 
@@ -1389,7 +1392,9 @@ class ManualCheckInView(APIView):
 
 
 class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
-    queryset = AdHocSession.objects.select_related('teacher__user', 'subject').order_by('id')
+    queryset = AdHocSession.objects.select_related(
+        'teacher__user', 'actual_teacher__user', 'subject'
+    ).order_by('id')
     serializer_class = AdHocSessionSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']

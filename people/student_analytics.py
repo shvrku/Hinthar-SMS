@@ -59,7 +59,7 @@ def build_student_attendance_summary(student, range_key: str):
             session__start_time__date__gte=date_from,
             session__start_time__date__lte=date_to,
         )
-        .select_related('session__class_obj')
+        .select_related('session__class_obj', 'session__timetable_slot__subject')
     )
 
     adhoc_rows = (
@@ -68,11 +68,13 @@ def build_student_attendance_summary(student, range_key: str):
             ad_hoc_session__date__gte=date_from,
             ad_hoc_session__date__lte=date_to,
         )
+        .select_related('ad_hoc_session__subject')
     )
 
     status_counts = {'present': 0, 'late': 0, 'absent': 0, 'excused': 0}
     trend_map = {}
     by_class_map = {}
+    by_subject_map = {}
 
     for row in session_rows:
         status = row.status if row.status in status_counts else 'absent'
@@ -98,12 +100,46 @@ def build_student_attendance_summary(student, range_key: str):
         class_entry[status] += 1
         class_entry['total'] += 1
 
+        subject = getattr(row.session.timetable_slot, 'subject', None)
+        subject_key = subject.id if subject else 0
+        subject_entry = by_subject_map.setdefault(
+            subject_key,
+            {
+                'subject_id': subject.id if subject else None,
+                'subject_label': subject.name if subject else 'Unknown',
+                'present': 0,
+                'late': 0,
+                'absent': 0,
+                'excused': 0,
+                'total': 0,
+            },
+        )
+        subject_entry[status] += 1
+        subject_entry['total'] += 1
+
     for row in adhoc_rows:
         status = row.status if row.status in status_counts else 'absent'
         status_counts[status] += 1
         session_date = row.ad_hoc_session.date.isoformat()
         bucket = trend_map.setdefault(session_date, {'present': 0, 'late': 0, 'absent': 0, 'excused': 0})
         bucket[status] += 1
+
+        subject = row.ad_hoc_session.subject
+        subject_key = subject.id if subject else 0
+        subject_entry = by_subject_map.setdefault(
+            subject_key,
+            {
+                'subject_id': subject.id if subject else None,
+                'subject_label': subject.name if subject else 'Ad-hoc',
+                'present': 0,
+                'late': 0,
+                'absent': 0,
+                'excused': 0,
+                'total': 0,
+            },
+        )
+        subject_entry[status] += 1
+        subject_entry['total'] += 1
 
     total_sessions = sum(status_counts.values())
     attended = status_counts['present'] + status_counts['late']
@@ -141,6 +177,7 @@ def build_student_attendance_summary(student, range_key: str):
                 for k in ('present', 'late', 'absent', 'excused')
             ],
             'by_class': sorted(by_class_map.values(), key=lambda x: x['class_label']),
+            'by_subject': sorted(by_subject_map.values(), key=lambda x: x['subject_label']),
             'trend': lesson_trend,
         },
     }

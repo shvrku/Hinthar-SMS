@@ -15,6 +15,14 @@ class Session(models.Model):
     
     timetable_slot = models.ForeignKey(TimetableSlot, on_delete=models.PROTECT, related_name='sessions')
     teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='sessions')
+    actual_teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.PROTECT,
+        related_name='sessions_taught',
+        null=True,
+        blank=True,
+        help_text='Who actually taught. Null means taught as assigned (or not yet run). Set when a substitute covers.',
+    )
     class_obj = models.ForeignKey(Class, on_delete=models.PROTECT, related_name='sessions')
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
@@ -23,6 +31,9 @@ class Session(models.Model):
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
             raise ValidationError('end_time must be after start_time.')
+        if self.actual_teacher_id and self.teacher_id and self.actual_teacher_id == self.teacher_id:
+            # Same as assigned is redundant; store as null (taught as assigned).
+            self.actual_teacher = None
     
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -85,6 +96,14 @@ class SessionAttendance(models.Model):
 
 class AdHocSession(models.Model):
     teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='adhoc_sessions')
+    actual_teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.PROTECT,
+        related_name='adhoc_sessions_taught',
+        null=True,
+        blank=True,
+        help_text='Who actually taught. Null means taught as assigned. Set when a substitute covers.',
+    )
     subject = models.ForeignKey('people.Subject', on_delete=models.PROTECT, related_name='adhoc_sessions')
     date = models.DateField(db_index=True)
     start_time = models.TimeField()
@@ -94,6 +113,8 @@ class AdHocSession(models.Model):
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
             raise ValidationError('end_time must be after start_time.')
+        if self.actual_teacher_id and self.teacher_id and self.actual_teacher_id == self.teacher_id:
+            self.actual_teacher = None
 
     def save(self, *args, **kwargs):
         self.full_clean()

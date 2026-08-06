@@ -283,7 +283,11 @@ Reject `class_id` missing / `all` / `adhoc` with **400**. Unknown integer IDs re
 }
 ```
 
-Datetime: **ISO-8601 everywhere** (stop mixing `dd/mm/yy` in serializers for new/updated fields).
+Datetime: **ISO-8601 everywhere** for API `DateTimeField` responses (including
+`Session.start_time` / `end_time`). Date-only fields and query params use
+`YYYY-MM-DD`. Clock-only fields (timetable / ad-hoc) use `HH:MM:SS`.
+Legacy `dd/mm/yy HH:MM:SS` may still be accepted on **input** for older clients;
+do not emit it on new/updated serializers.
 
 ### Ad-hoc matrix
 
