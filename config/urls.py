@@ -11,7 +11,12 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
 )
 
+from config.views import health
+
 urlpatterns = [
+    # Public liveness — UptimeRobot / load balancers (no auth)
+    path('health/', health, name='health'),
+
     path('admin/', admin.site.urls),
 
     # API endpoints version 1
