@@ -64,6 +64,7 @@ MIDDLEWARE = [
 
 # CORS — fully env-driven. Localhost is NOT auto-trusted in production.
 # Dev convenience: when DEBUG and CORS_ALLOWED_ORIGINS is empty, allow local Next.js.
+# Required for browser → Django (direct API) so Vercel does not proxy every call.
 _cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()]
 if DEBUG and not CORS_ALLOWED_ORIGINS:
@@ -74,6 +75,12 @@ if DEBUG and not CORS_ALLOWED_ORIGINS:
         "http://127.0.0.1:3001",
     ]
 CORS_ALLOW_CREDENTIALS = True
+# Cache preflight so browsers don't OPTIONS on every API call.
+CORS_PREFLIGHT_MAX_AGE = int(os.getenv("CORS_PREFLIGHT_MAX_AGE", "86400"))
+# Optional regex allowlist (comma-separated), e.g. Vercel preview URLs:
+# CORS_ALLOWED_ORIGIN_REGEXES=^https://.*\.vercel\.app$
+_cors_regex_env = os.getenv("CORS_ALLOWED_ORIGIN_REGEXES", "")
+CORS_ALLOWED_ORIGIN_REGEXES = [r.strip() for r in _cors_regex_env.split(",") if r.strip()]
 
 ROOT_URLCONF = 'config.urls'
 
