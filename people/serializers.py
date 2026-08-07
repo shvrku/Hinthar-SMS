@@ -72,14 +72,51 @@ class TeacherSerializer(serializers.ModelSerializer):
 class StudentSerializer(serializers.ModelSerializer):
     user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')
     school_code = serializers.ChoiceField(choices=SCHOOL_CHOICES, required=True)
-    
+    class_labels = serializers.SerializerMethodField()
+    class_ids = serializers.SerializerMethodField()
+
     class Meta:
         model = Student
         fields = [
             'id', 'unique_code', 'exam_candidate_number', 'name', 'dob', 'enrollment_date',
             'contact', 'school_code', 'user_id', 'check_in_token', 'check_in_token_active',
+            'class_labels', 'class_ids',
         ]
-        read_only_fields = ['unique_code', 'check_in_token', 'check_in_token_active']
+        read_only_fields = [
+            'unique_code', 'check_in_token', 'check_in_token_active',
+            'class_labels', 'class_ids',
+        ]
+
+    def _enrollments(self, obj):
+        # Prefetched as enrolled_classes → class_obj when list uses prefetch_related.
+        return list(obj.enrolled_classes.all())
+
+    def get_class_ids(self, obj):
+        return [e.class_obj_id for e in self._enrollments(obj) if e.class_obj_id]
+
+    def get_class_labels(self, obj):
+        level_labels = {
+            'IAL': 'IAL (A Level)',
+            'IG': 'IGCSE',
+            'Year1': 'Year 1',
+            'Year2': 'Year 2',
+            'Year3': 'Year 3',
+            'Year4': 'Year 4',
+            'Year5': 'Year 5',
+            'Year6': 'Year 6',
+            'Year7': 'Year 7',
+            'Year8': 'Year 8',
+            'Year9': 'Year 9',
+        }
+        labels = []
+        for e in self._enrollments(obj):
+            cls = e.class_obj
+            if not cls:
+                continue
+            level = level_labels.get(cls.education_level, cls.education_level)
+            stream = f"{cls.cohort_identifier}{cls.cohort_sub_category or ''}".strip()
+            labels.append(f"{level} · {stream}" if stream else level)
+        return labels
 
     def to_representation(self, instance):
         """

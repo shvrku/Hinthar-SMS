@@ -171,9 +171,10 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         return ctx
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().prefetch_related('enrolled_classes__class_obj')
         q = (self.request.query_params.get('q') or '').strip()
         school_code = self.request.query_params.get('school_code')
+        class_id = self.request.query_params.get('class_id')
 
         if q:
             qs = qs.filter(
@@ -184,6 +185,11 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
             )
         if school_code and school_code != 'all':
             qs = qs.filter(school_code=school_code)
+        if class_id and class_id != 'all':
+            try:
+                qs = qs.filter(enrolled_classes__class_obj_id=int(class_id)).distinct()
+            except (TypeError, ValueError):
+                pass
 
         return qs
 
