@@ -25,7 +25,7 @@ Roles live on `people.User.role` (Django), not Clerk public metadata, until an e
 Prefer **level checks** over ad-hoc `role in (...)` lists sprinkled across views.
 
 ```python
-# people/roles.py (to add)
+# people/roles.py (implemented)
 ROLE_RANK = {
     'student': 1,
     'teacher': 2,
@@ -203,9 +203,23 @@ Document aliases in OpenAPI `deprecated=True` until removed.
 
 - `GET /session-attendances/` (filters `session__class_obj_id`; `class_obj_id` alias)
 - `GET /class-students/` (filters enrollment `class_obj_id`; `class_obj_id` alias)
+- `GET /timetable-slots/` (filters `class_obj_id`; `class_obj_id` alias) — **required** for Find sessions / class editors; do not return all-school slots when the UI is class-scoped
 - `GET /sessions/` and matrix/overview aggregates (already documented)
 
 Clients should send `class_id`; servers may still accept `class_obj_id` during the alias window.
+
+### Session list filters (Find sessions)
+
+`GET /sessions/` supports (among others):
+
+| Param | Meaning |
+|-------|---------|
+| `timetable_slot_id` | Occurrences generated from that weekly slot |
+| `class_id` | Sessions for one class cohort |
+| `date_from` / `date_to` | Inclusive calendar bounds on `start_time` date (`YYYY-MM-DD`) |
+| `teacher_id` | Assigned teacher filter (existing) |
+
+Paginate as usual. Dashboard Find sessions loads the slot table with `timetable_slot_id` + date range — not a fetch-all of school sessions.
 
 ---
 
@@ -283,11 +297,14 @@ Reject `class_id` missing / `all` / `adhoc` with **400**. Unknown integer IDs re
 }
 ```
 
-Datetime: **ISO-8601 everywhere** for API `DateTimeField` responses (including
-`Session.start_time` / `end_time`). Date-only fields and query params use
+Datetime: **ISO-8601 everywhere** for API `DateTimeField` **responses** (including
+`Session.start_time` / `end_time`, nested session times on attendance lists, and
+generate-summary timestamps). Date-only fields and query params use
 `YYYY-MM-DD`. Clock-only fields (timetable / ad-hoc) use `HH:MM:SS`.
 Legacy `dd/mm/yy HH:MM:SS` may still be accepted on **input** for older clients;
-do not emit it on new/updated serializers.
+do **not** emit it on serializers. Dashboard parses via `parseBackendDateTime` /
+related helpers in `lib/utils.ts` — never rely on bare `new Date(string)` for
+backend values.
 
 ### Ad-hoc matrix
 
@@ -361,6 +378,24 @@ Shape (conceptual):
 
 Invalid / missing `range` → **400** `{"error": "range must be one of: …"}`.
 
+### Class / teacher attendance summary aggregates
+
+```
+GET /api/v1/classes/{id}/attendance-summary/?range=week|month|all
+GET /api/v1/teachers/{id}/attendance-summary/?range=week|month|all
+```
+
+Staff+ only. Same `range` semantics as the student summary. Campus check-in and
+lesson roll stay **separately labeled** in the payload (never one blended rate).
+
+- **Class:** roster-scoped campus presence + lesson marks for that cohort.
+- **Teacher:** accountability (student rolls on sessions taught) + personal
+  presence derived from session status and assigned vs `actual_teacher`.
+
+`actual_teacher` on `Session` / `AdHocSession` is nullable: `null` means taught
+as assigned; a set FK means a **substitute**. Same-as-assigned values normalize
+to null on save. Teacher check-in writing this field is deferred.
+
 ### Student check-in QR token lifecycle
 
 | Action | Method / path | Notes |
@@ -393,7 +428,8 @@ Suggested future routes (if product needs them):
 | `GET /adhoc-attendance/matrix/` | Tutoring roll (exists) |
 | `GET /check-ins/overview/` | Daily campus presence by class/date + school-wide search (**implemented**, see above) |
 | `GET /students/{id}/attendance-summary/` | Per-student campus + lesson analytics (**implemented**, see above) |
-| `GET /classes/{id}/attendance-summary/` | Per-class lesson analytics (planned) |
+| `GET /classes/{id}/attendance-summary/` | Per-class campus + lesson analytics (**implemented**, see above) |
+| `GET /teachers/{id}/attendance-summary/` | Teacher accountability + personal (**implemented**, see above) |
 | `GET /attendance/session/{id}/roster/` | Single-session roster + statuses (optional split from matrix) |
 
 ---

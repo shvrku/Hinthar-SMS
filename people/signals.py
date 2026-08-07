@@ -20,21 +20,29 @@ def _log_action(user, model_name, record_id, action, field_name=None, old_value=
     )
 
 
+def _capture_old_status(sender, instance):
+    """
+    Prefer status loaded via Model.from_db (_old_status already set).
+    Only hit the DB when the instance was constructed without from_db
+    (e.g. Session(pk=…) then field assign) and status may have changed.
+    """
+    if getattr(instance, '_skip_audit', False):
+        return
+    if hasattr(instance, '_old_status'):
+        return
+    if instance.pk:
+        instance._old_status = (
+            sender.objects.filter(pk=instance.pk).values_list('status', flat=True).first()
+        )
+    else:
+        instance._old_status = None
+
+
 # ---- Session auditing (status changes) ----
 
 @receiver(pre_save, sender='class_sessions.Session')
 def audit_session_pre_save(sender, instance, **kwargs):
-    """Capture old values before save for status field changes."""
-    if getattr(instance, '_skip_audit', False):
-        return
-    if instance.pk:
-        try:
-            old = sender.objects.get(pk=instance.pk)
-            instance._old_status = old.status
-        except sender.DoesNotExist:
-            instance._old_status = None
-    else:
-        instance._old_status = None
+    _capture_old_status(sender, instance)
 
 
 @receiver(post_save, sender='class_sessions.Session')
@@ -49,6 +57,7 @@ def audit_session_post_save(sender, instance, created, **kwargs):
             action='create',
             new_value=f"status={instance.status}, start={instance.start_time:%d/%m/%y %H:%M}",
         )
+        instance._old_status = instance.status
     else:
         old_status = getattr(instance, '_old_status', None)
 
@@ -62,21 +71,12 @@ def audit_session_post_save(sender, instance, created, **kwargs):
                 old_value=old_status,
                 new_value=instance.status,
             )
+        instance._old_status = instance.status
 
 
 @receiver(pre_save, sender='class_sessions.AdHocSession')
 def audit_adhoc_session_pre_save(sender, instance, **kwargs):
-    """Capture old values before save for status field changes in AdHocSession."""
-    if getattr(instance, '_skip_audit', False):
-        return
-    if instance.pk:
-        try:
-            old = sender.objects.get(pk=instance.pk)
-            instance._old_status = old.status
-        except sender.DoesNotExist:
-            instance._old_status = None
-    else:
-        instance._old_status = None
+    _capture_old_status(sender, instance)
 
 
 @receiver(post_save, sender='class_sessions.AdHocSession')
@@ -91,6 +91,7 @@ def audit_adhoc_session_post_save(sender, instance, created, **kwargs):
             action='create',
             new_value=f"status={instance.status}, date={instance.date:%d/%m/%y}, start={instance.start_time:%H:%M}",
         )
+        instance._old_status = instance.status
     else:
         old_status = getattr(instance, '_old_status', None)
 
@@ -104,3 +105,4 @@ def audit_adhoc_session_post_save(sender, instance, created, **kwargs):
                 old_value=old_status,
                 new_value=instance.status,
             )
+        instance._old_status = instance.status

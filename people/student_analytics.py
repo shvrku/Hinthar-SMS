@@ -1,11 +1,19 @@
+"""Student attendance analytics.
+
+`range=all` remains enrollment→today (intentional). Aggregation is pushed to the
+DB where possible so long histories stay correct without Python row loops.
+"""
 from datetime import timedelta
 
+from django.db.models import Count, F
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from class_sessions.models import CheckIn, SessionAttendance, AdHocSessionAttendance
 
 
 VALID_RANGES = frozenset({'week', 'month', 'all'})
+_STATUS_KEYS = ('present', 'late', 'absent', 'excused')
 
 
 def resolve_student_analytics_range(range_key: str, enrollment_date):
@@ -31,6 +39,21 @@ def _iter_dates(date_from, date_to):
         current += timedelta(days=1)
 
 
+def _empty_status():
+    return {k: 0 for k in _STATUS_KEYS}
+
+
+def _bump(bucket: dict, status: str, n: int = 1):
+    key = status if status in bucket else 'absent'
+    bucket[key] += n
+
+
+def _class_label(education_level, cohort_identifier, cohort_sub_category):
+    if cohort_sub_category:
+        return f"{education_level} {cohort_identifier}{cohort_sub_category}"
+    return f"{education_level} {cohort_identifier}"
+
+
 def build_student_attendance_summary(student, range_key: str):
     if range_key not in VALID_RANGES:
         raise ValueError(f'range must be one of: {", ".join(sorted(VALID_RANGES))}')
@@ -45,6 +68,7 @@ def build_student_attendance_summary(student, range_key: str):
         ).values_list('date', flat=True)
     )
 
+    # Keep full since-enrollment daily series (range=all semantics unchanged).
     calendar_days = list(_iter_dates(date_from, date_to))
     campus_daily = [
         {'date': d.isoformat(), 'checked_in': d in check_in_dates}
@@ -53,106 +77,134 @@ def build_student_attendance_summary(student, range_key: str):
     days_in_range = len(calendar_days)
     days_checked_in = len(check_in_dates)
 
-    session_rows = (
-        SessionAttendance.objects.filter(
-            student=student,
-            session__start_time__date__gte=date_from,
-            session__start_time__date__lte=date_to,
-        )
-        .select_related('session__class_obj', 'session__timetable_slot__subject')
-    )
-
-    adhoc_rows = (
-        AdHocSessionAttendance.objects.filter(
-            student=student,
-            ad_hoc_session__date__gte=date_from,
-            ad_hoc_session__date__lte=date_to,
-        )
-        .select_related('ad_hoc_session__subject')
-    )
-
-    status_counts = {'present': 0, 'late': 0, 'absent': 0, 'excused': 0}
+    status_counts = _empty_status()
     trend_map = {}
     by_class_map = {}
     by_subject_map = {}
 
-    for row in session_rows:
-        status = row.status if row.status in status_counts else 'absent'
-        status_counts[status] += 1
-        session_date = row.session.start_time.date().isoformat()
-        bucket = trend_map.setdefault(session_date, {'present': 0, 'late': 0, 'absent': 0, 'excused': 0})
-        bucket[status] += 1
+    session_base = SessionAttendance.objects.filter(
+        student=student,
+        session__start_time__date__gte=date_from,
+        session__start_time__date__lte=date_to,
+    )
 
-        class_obj = row.session.class_obj
-        class_key = class_obj.id
-        class_entry = by_class_map.setdefault(
+    for row in session_base.values('status').annotate(c=Count('id')):
+        _bump(status_counts, row['status'], row['c'])
+
+    for row in (
+        session_base
+        .values(
+            'status',
+            class_id=F('session__class_obj_id'),
+            education_level=F('session__class_obj__education_level'),
+            cohort_identifier=F('session__class_obj__cohort_identifier'),
+            cohort_sub_category=F('session__class_obj__cohort_sub_category'),
+        )
+        .annotate(c=Count('id'))
+    ):
+        class_key = row['class_id']
+        entry = by_class_map.setdefault(
             class_key,
             {
-                'class_id': class_obj.id,
-                'class_label': str(class_obj),
-                'present': 0,
-                'late': 0,
-                'absent': 0,
-                'excused': 0,
+                'class_id': class_key,
+                'class_label': _class_label(
+                    row['education_level'],
+                    row['cohort_identifier'],
+                    row['cohort_sub_category'],
+                ),
+                **_empty_status(),
                 'total': 0,
             },
         )
-        class_entry[status] += 1
-        class_entry['total'] += 1
+        _bump(entry, row['status'], row['c'])
+        entry['total'] += row['c']
 
-        subject = getattr(row.session.timetable_slot, 'subject', None)
-        subject_key = subject.id if subject else 0
-        subject_entry = by_subject_map.setdefault(
+    for row in (
+        session_base
+        .values(
+            'status',
+            subject_id=F('session__timetable_slot__subject_id'),
+            subject_name=F('session__timetable_slot__subject__name'),
+        )
+        .annotate(c=Count('id'))
+    ):
+        subject_key = row['subject_id'] or 0
+        entry = by_subject_map.setdefault(
             subject_key,
             {
-                'subject_id': subject.id if subject else None,
-                'subject_label': subject.name if subject else 'Unknown',
-                'present': 0,
-                'late': 0,
-                'absent': 0,
-                'excused': 0,
+                'subject_id': row['subject_id'],
+                'subject_label': row['subject_name'] or 'Unknown',
+                **_empty_status(),
                 'total': 0,
             },
         )
-        subject_entry[status] += 1
-        subject_entry['total'] += 1
+        _bump(entry, row['status'], row['c'])
+        entry['total'] += row['c']
 
-    for row in adhoc_rows:
-        status = row.status if row.status in status_counts else 'absent'
-        status_counts[status] += 1
-        session_date = row.ad_hoc_session.date.isoformat()
-        bucket = trend_map.setdefault(session_date, {'present': 0, 'late': 0, 'absent': 0, 'excused': 0})
-        bucket[status] += 1
+    for row in (
+        session_base
+        .annotate(session_date=TruncDate('session__start_time'))
+        .values('session_date', 'status')
+        .annotate(c=Count('id'))
+    ):
+        if row['session_date'] is None:
+            continue
+        day_key = row['session_date'].isoformat()
+        bucket = trend_map.setdefault(day_key, _empty_status())
+        _bump(bucket, row['status'], row['c'])
 
-        subject = row.ad_hoc_session.subject
-        subject_key = subject.id if subject else 0
-        subject_entry = by_subject_map.setdefault(
+    adhoc_base = AdHocSessionAttendance.objects.filter(
+        student=student,
+        ad_hoc_session__date__gte=date_from,
+        ad_hoc_session__date__lte=date_to,
+    )
+
+    for row in adhoc_base.values('status').annotate(c=Count('id')):
+        _bump(status_counts, row['status'], row['c'])
+
+    for row in (
+        adhoc_base
+        .values(
+            'status',
+            subject_id=F('ad_hoc_session__subject_id'),
+            subject_name=F('ad_hoc_session__subject__name'),
+        )
+        .annotate(c=Count('id'))
+    ):
+        subject_key = row['subject_id'] or 0
+        entry = by_subject_map.setdefault(
             subject_key,
             {
-                'subject_id': subject.id if subject else None,
-                'subject_label': subject.name if subject else 'Ad-hoc',
-                'present': 0,
-                'late': 0,
-                'absent': 0,
-                'excused': 0,
+                'subject_id': row['subject_id'],
+                'subject_label': row['subject_name'] or 'Ad-hoc',
+                **_empty_status(),
                 'total': 0,
             },
         )
-        subject_entry[status] += 1
-        subject_entry['total'] += 1
+        _bump(entry, row['status'], row['c'])
+        entry['total'] += row['c']
+
+    for row in (
+        adhoc_base
+        .values('status', session_date=F('ad_hoc_session__date'))
+        .annotate(c=Count('id'))
+    ):
+        if row['session_date'] is None:
+            continue
+        day_key = row['session_date'].isoformat()
+        bucket = trend_map.setdefault(day_key, _empty_status())
+        _bump(bucket, row['status'], row['c'])
 
     total_sessions = sum(status_counts.values())
     attended = status_counts['present'] + status_counts['late']
     countable = total_sessions - status_counts['excused']
     lesson_rate = (attended / countable) if countable else None
 
+    # Only emit trend days that have marks (same as prior behavior).
     lesson_trend = [
-        {
-            'date': d.isoformat(),
-            **trend_map.get(d.isoformat(), {'present': 0, 'late': 0, 'absent': 0, 'excused': 0}),
-        }
-        for d in calendar_days
-        if any(trend_map.get(d.isoformat(), {}).values())
+        {'date': day_key, **counts}
+        for day_key, counts in sorted(trend_map.items())
+        if any(counts.values())
     ]
 
     return {
@@ -174,7 +226,7 @@ def build_student_attendance_summary(student, range_key: str):
             'rate_attended': lesson_rate,
             'by_status': [
                 {'status': k, 'count': status_counts[k]}
-                for k in ('present', 'late', 'absent', 'excused')
+                for k in _STATUS_KEYS
             ],
             'by_class': sorted(by_class_map.values(), key=lambda x: x['class_label']),
             'by_subject': sorted(by_subject_map.values(), key=lambda x: x['subject_label']),

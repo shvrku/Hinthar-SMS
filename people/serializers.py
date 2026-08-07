@@ -6,6 +6,7 @@ from people.models import Subject, Teacher, Student, Staff, AuditLog, SCHOOL_CHO
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
+    """Read-safe user shape for /me and nested contexts (SEC-L1)."""
     teacher_profile_id = serializers.PrimaryKeyRelatedField(read_only=True, source='teacher_profile.id')
     student_profile_id = serializers.PrimaryKeyRelatedField(read_only=True, source='student_profile.id')
     staff_profile_id = serializers.PrimaryKeyRelatedField(read_only=True, source='staff_profile.id')
@@ -29,6 +30,10 @@ class UserSerializer(serializers.ModelSerializer):
             'teacher_profile_id',
             'student_profile_id',
             'staff_profile_id',
+            'role',
+            'is_active',
+            'username',
+            'email',
         ]
 
     def validate_role(self, value):
@@ -36,6 +41,19 @@ class UserSerializer(serializers.ModelSerializer):
         if value not in ROLE_RANK:
             raise serializers.ValidationError(f'Invalid role: {value}')
         return value
+
+
+class AdminUserSerializer(UserSerializer):
+    """Admin-only write surface for role / is_active (SEC-L1)."""
+
+    class Meta(UserSerializer.Meta):
+        read_only_fields = [
+            'id',
+            'clerk_id',
+            'teacher_profile_id',
+            'student_profile_id',
+            'staff_profile_id',
+        ]
 
 class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
@@ -64,18 +82,28 @@ class StudentSerializer(serializers.ModelSerializer):
         read_only_fields = ['unique_code', 'check_in_token', 'check_in_token_active']
 
     def to_representation(self, instance):
+        """
+        SEC-H2: check_in_token is omitted unless the view explicitly opts in
+        (student detail retrieve / dedicated token actions). Active flag may
+        still appear for staff UI badges when privileged.
+        """
         representation = super().to_representation(instance)
         request = self.context.get('request')
+        include_token = bool(self.context.get('include_check_in_token'))
+
+        is_owner = False
+        is_privileged = False
         if request and request.user and request.user.is_authenticated:
             user = request.user
-            is_owner = (user.role == 'student' and instance.user == user)
+            is_owner = (user.role == 'student' and instance.user_id == user.id)
             is_privileged = user.role in ('admin', 'staff')
-            if not (is_owner or is_privileged):
-                representation.pop('check_in_token', None)
-                representation.pop('check_in_token_active', None)
-        else:
+
+        if not include_token or not (is_owner or is_privileged):
             representation.pop('check_in_token', None)
+
+        if not (is_owner or is_privileged):
             representation.pop('check_in_token_active', None)
+
         return representation
 
 class StaffSerializer(serializers.ModelSerializer):

@@ -9,7 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
 from django.core.cache import cache
@@ -39,11 +39,13 @@ def revert_checkin_auto_attendance(checkin_ids):
 
 
 class SessionViewSet(BulkOperationsMixin, ModelViewSet):
+    # PERF-H1: do not prefetch attendances on list — serializer does not embed them;
+    # matrix/detail endpoints load attendances explicitly when needed.
     queryset = Session.objects.select_related(
         'teacher__user', 'actual_teacher__user', 'class_obj',
         'timetable_slot__class_obj', 'timetable_slot__subject',
         'timetable_slot__teacher__user',
-    ).prefetch_related('attendances').order_by('id')
+    ).order_by('id')
     serializer_class = SessionSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
@@ -123,7 +125,7 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             )
         session.status = new_status
         session._audit_user = request.user
-        session.save()
+        session.save(update_fields=['status'])
         serializer = self.get_serializer(session)
         return Response(serializer.data)
 
@@ -1291,6 +1293,7 @@ class StatsView(APIView):
         if data is not None:
             return Response(data)
 
+        # PERF-M2: one round-trip of scalar subselects instead of N sequential COUNT(*)
         models = {
             'users': User,
             'students': Student,
@@ -1304,7 +1307,16 @@ class StatsView(APIView):
             'session_attendances': SessionAttendance,
             'check_ins': CheckIn,
         }
-        data = {key: model.objects.count() for key, model in models.items()}
+        select_parts = []
+        keys = []
+        for key, model in models.items():
+            table = connection.ops.quote_name(model._meta.db_table)
+            select_parts.append(f'(SELECT COUNT(*) FROM {table})')
+            keys.append(key)
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT ' + ', '.join(select_parts))
+            row = cursor.fetchone()
+        data = {key: int(row[i] or 0) for i, key in enumerate(keys)}
         cache.set(self.STATS_CACHE_KEY, data, self.STATS_CACHE_TTL)
         return Response(data)
 
@@ -1459,7 +1471,7 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
             )
         session.status = new_status
         session._audit_user = request.user
-        session.save()
+        session.save(update_fields=['status'])
         serializer = self.get_serializer(session)
         return Response(serializer.data)
 

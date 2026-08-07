@@ -9,7 +9,7 @@ from rest_framework.decorators import action
 from rest_framework import status
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 from people.serializers import (
-    UserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
+    UserSerializer, AdminUserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
 from people.models import Subject, Teacher, Student, Staff, AuditLog
 from people.permissions import IsAdmin, IsStaffOrAbove, IsStudentOwnerOrStaffOrAdmin
@@ -156,6 +156,20 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
+    # SEC-H2: only detail retrieve + dedicated token actions may include the secret
+    _TOKEN_ACTIONS = frozenset({
+        'retrieve',
+        'check_in_token',
+        'regenerate_check_in_token',
+    })
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        action = getattr(self, 'action', None)
+        if action in self._TOKEN_ACTIONS:
+            ctx['include_check_in_token'] = True
+        return ctx
+
     def get_queryset(self):
         qs = super().get_queryset()
         q = (self.request.query_params.get('q') or '').strip()
@@ -277,7 +291,7 @@ class UserViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = User.objects.select_related(
         'teacher_profile', 'student_profile', 'staff_profile'
     ).order_by('id')
-    serializer_class = UserSerializer
+    serializer_class = AdminUserSerializer
     permission_classes = [IsAdmin]
     ordering = ['id']
     http_method_names = ['get', 'head', 'options', 'patch', 'put']
@@ -296,11 +310,9 @@ class UserViewSet(BulkOperationsMixin, ModelViewSet):
 
         return qs
 
-    def partial_update(self, request, *args, **kwargs):
-        """Only allow role / is_active changes; never clerk_id or self-demotion traps."""
-        instance = self.get_object()
-        # Prevent removing the last admin or demoting yourself accidentally without care
-        new_role = request.data.get('role', instance.role)
+    def _validate_role_change(self, instance, data):
+        """Shared guards for PATCH and PUT (SEC-M3)."""
+        new_role = data.get('role', instance.role)
         if instance.role == 'admin' and new_role != 'admin':
             other_admins = User.objects.filter(role='admin').exclude(pk=instance.pk).count()
             if other_admins == 0:
@@ -313,7 +325,23 @@ class UserViewSet(BulkOperationsMixin, ModelViewSet):
                 {'error': f'Invalid role. Must be one of: {sorted(ROLE_RANK.keys())}'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        return None
+
+    def partial_update(self, request, *args, **kwargs):
+        """Only allow role / is_active changes; never clerk_id or self-demotion traps."""
+        instance = self.get_object()
+        error = self._validate_role_change(instance, request.data)
+        if error is not None:
+            return error
         return super().partial_update(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """PUT must apply the same last-admin / role-validity guards as PATCH."""
+        instance = self.get_object()
+        error = self._validate_role_change(instance, request.data)
+        if error is not None:
+            return error
+        return super().update(request, *args, **kwargs)
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

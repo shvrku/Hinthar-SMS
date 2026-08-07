@@ -59,34 +59,63 @@ class StudentSerializerTest(TestCase):
         self.other_student_user = User.objects.create_user(username="student_user2", role="student", clerk_id="s_2")
         self.terminal_user = User.objects.create_user(username="terminal_user", role="terminal", clerk_id="t_1")
         self.teacher_user = User.objects.create_user(username="teacher_user", role="teacher", clerk_id="te_1")
+        self.staff_user = User.objects.create_user(username="staff_user", role="staff", clerk_id="st_1")
         
         self.student = Student.objects.create(name="Owned Student", user=self.student_user)
         from people.serializers import StudentSerializer
         self.serializer_class = StudentSerializer
 
-    def test_token_visible_to_student_owner(self):
+    def test_token_omitted_from_list_context_even_for_staff(self):
+        """SEC-H2: list responses must not include check_in_token."""
         request = self.factory.get('/api/v1/students/')
-        request.user = self.student_user
-        serializer = self.serializer_class(self.student, context={'request': request})
-        self.assertIn('check_in_token', serializer.data)
-
-    def test_token_hidden_from_other_students(self):
-        request = self.factory.get('/api/v1/students/')
-        request.user = self.other_student_user
+        request.user = self.staff_user
         serializer = self.serializer_class(self.student, context={'request': request})
         self.assertNotIn('check_in_token', serializer.data)
 
-    def test_token_visible_to_terminal_role(self):
-        request = self.factory.get('/api/v1/students/')
-        request.user = self.terminal_user
-        serializer = self.serializer_class(self.student, context={'request': request})
+    def test_token_visible_to_student_owner_when_opted_in(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.student_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
         self.assertIn('check_in_token', serializer.data)
+
+    def test_token_hidden_from_other_students_even_when_opted_in(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.other_student_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        self.assertNotIn('check_in_token', serializer.data)
+
+    def test_token_hidden_from_terminal_role(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.terminal_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        self.assertNotIn('check_in_token', serializer.data)
 
     def test_token_hidden_from_teacher_role(self):
-        request = self.factory.get('/api/v1/students/')
+        request = self.factory.get('/api/v1/students/1/')
         request.user = self.teacher_user
-        serializer = self.serializer_class(self.student, context={'request': request})
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
         self.assertNotIn('check_in_token', serializer.data)
+
+    def test_token_visible_to_staff_on_detail_opt_in(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.staff_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        self.assertIn('check_in_token', serializer.data)
 
 
 from people.models import Teacher, Staff

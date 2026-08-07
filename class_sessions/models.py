@@ -35,8 +35,18 @@ class Session(models.Model):
             # Same as assigned is redundant; store as null (taught as assigned).
             self.actual_teacher = None
     
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        """Track loaded status so audit signals skip an extra SELECT (PERF-M1)."""
+        instance = super().from_db(db, field_names, values)
+        instance._old_status = instance.status
+        return instance
+
     def save(self, *args, **kwargs):
-        self.full_clean()
+        # BUG-M1: skip full_clean on status-only updates (bulk status / patch paths)
+        update_fields = kwargs.get('update_fields')
+        if update_fields is None or not set(update_fields).issubset({'status'}):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     class Meta:
@@ -116,8 +126,17 @@ class AdHocSession(models.Model):
         if self.actual_teacher_id and self.teacher_id and self.actual_teacher_id == self.teacher_id:
             self.actual_teacher = None
 
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        """Track loaded status so audit signals skip an extra SELECT (PERF-M1)."""
+        instance = super().from_db(db, field_names, values)
+        instance._old_status = instance.status
+        return instance
+
     def save(self, *args, **kwargs):
-        self.full_clean()
+        update_fields = kwargs.get('update_fields')
+        if update_fields is None or not set(update_fields).issubset({'status'}):
+            self.full_clean()
         super().save(*args, **kwargs)
 
     class Meta:
