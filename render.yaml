@@ -33,7 +33,11 @@ services:
       - key: CLERK_JWT_AUDIENCE
         sync: false
       # Comma-separated dashboard origin(s), e.g. https://your-app.vercel.app
+      # Required when the dashboard calls Django directly (NEXT_PUBLIC_API_ORIGIN).
       - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      # Optional Vercel preview allowlist: ^https://.*\.vercel\.app$
+      - key: CORS_ALLOWED_ORIGIN_REGEXES
         sync: false
       # Optional: shared cache across workers
       # - key: REDIS_URL

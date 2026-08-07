@@ -17,6 +17,9 @@ venv/
 .env.*
 !.env.example
 
+# Local deploy env dumps (may contain secrets)
+/deploy/
+
 # Database
 db.sqlite3
 
