@@ -15,19 +15,38 @@ class Session(models.Model):
     
     timetable_slot = models.ForeignKey(TimetableSlot, on_delete=models.PROTECT, related_name='sessions')
     teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='sessions')
+    actual_teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.PROTECT,
+        related_name='sessions_taught',
+        null=True,
+        blank=True,
+        help_text='Who actually taught. Null means taught as assigned (or not yet run). Set when a substitute covers.',
+    )
     class_obj = models.ForeignKey(Class, on_delete=models.PROTECT, related_name='sessions')
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
-    paid = models.BooleanField(default=False)
-    # payslip = models.ForeignKey('payroll.Payslip', on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')  # Archived
     
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
             raise ValidationError('end_time must be after start_time.')
+        if self.actual_teacher_id and self.teacher_id and self.actual_teacher_id == self.teacher_id:
+            # Same as assigned is redundant; store as null (taught as assigned).
+            self.actual_teacher = None
     
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        """Track loaded status so audit signals skip an extra SELECT (PERF-M1)."""
+        instance = super().from_db(db, field_names, values)
+        instance._old_status = instance.status
+        return instance
+
     def save(self, *args, **kwargs):
-        self.full_clean()
+        # BUG-M1: skip full_clean on status-only updates (bulk status / patch paths)
+        update_fields = kwargs.get('update_fields')
+        if update_fields is None or not set(update_fields).issubset({'status'}):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     class Meta:
@@ -40,10 +59,8 @@ class Session(models.Model):
         indexes = [
             models.Index(fields=['class_obj', 'start_time'], name='idx_session_class_start'),
             models.Index(fields=['teacher', 'start_time'], name='idx_session_teacher_start'),
-            models.Index(fields=['status', 'paid'], name='idx_session_status_paid'),
             models.Index(fields=['start_time']),
             models.Index(fields=['status']),
-            models.Index(fields=['paid']),
         ]
         
     def __str__(self):
@@ -55,11 +72,20 @@ class SessionAttendance(models.Model):
         ('present', 'Present'),
         ('absent', 'Absent'),
         ('late', 'Late'),
+        ('excused', 'Excused'),
     ]
     
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='attendances')
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='attendances')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='absent')
+    auto_marked_by_checkin = models.ForeignKey(
+        'CheckIn',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='auto_marked_session_attendances',
+        editable=False,
+    )
     
     class Meta:
         constraints = [
@@ -80,19 +106,37 @@ class SessionAttendance(models.Model):
 
 class AdHocSession(models.Model):
     teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='adhoc_sessions')
+    actual_teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.PROTECT,
+        related_name='adhoc_sessions_taught',
+        null=True,
+        blank=True,
+        help_text='Who actually taught. Null means taught as assigned. Set when a substitute covers.',
+    )
     subject = models.ForeignKey('people.Subject', on_delete=models.PROTECT, related_name='adhoc_sessions')
     date = models.DateField(db_index=True)
     start_time = models.TimeField()
     end_time = models.TimeField()
     status = models.CharField(max_length=20, choices=Session.STATUS_CHOICES, default='scheduled')
-    paid = models.BooleanField(default=False)
 
     def clean(self):
         if self.start_time and self.end_time and self.end_time <= self.start_time:
             raise ValidationError('end_time must be after start_time.')
+        if self.actual_teacher_id and self.teacher_id and self.actual_teacher_id == self.teacher_id:
+            self.actual_teacher = None
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        """Track loaded status so audit signals skip an extra SELECT (PERF-M1)."""
+        instance = super().from_db(db, field_names, values)
+        instance._old_status = instance.status
+        return instance
 
     def save(self, *args, **kwargs):
-        self.full_clean()
+        update_fields = kwargs.get('update_fields')
+        if update_fields is None or not set(update_fields).issubset({'status'}):
+            self.full_clean()
         super().save(*args, **kwargs)
 
     class Meta:
@@ -105,7 +149,6 @@ class AdHocSession(models.Model):
         indexes = [
             models.Index(fields=['teacher', 'date']),
             models.Index(fields=['status']),
-            models.Index(fields=['paid']),
         ]
 
     def __str__(self):
@@ -116,6 +159,14 @@ class AdHocSessionAttendance(models.Model):
     ad_hoc_session = models.ForeignKey(AdHocSession, on_delete=models.CASCADE, related_name='attendances')
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='adhoc_attendances')
     status = models.CharField(max_length=20, choices=SessionAttendance.STATUS_CHOICES, default='absent')
+    auto_marked_by_checkin = models.ForeignKey(
+        'CheckIn',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='auto_marked_adhoc_attendances',
+        editable=False,
+    )
 
     class Meta:
         constraints = [

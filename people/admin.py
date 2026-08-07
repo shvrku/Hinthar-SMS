@@ -24,7 +24,7 @@ class SubjectAdmin(admin.ModelAdmin):
 
 @admin.register(Teacher)
 class TeacherAdmin(admin.ModelAdmin):
-    list_display = ('id', 'unique_code', 'name', 'employment_type', 'default_rate', 'join_date', 'school_code', 'user')
+    list_display = ('id', 'unique_code', 'name', 'employment_type', 'join_date', 'school_code', 'user')
     list_filter = ('employment_type', 'school_code')
     search_fields = ('unique_code', 'name', 'contact')
     raw_id_fields = ('user',)

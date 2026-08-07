@@ -17,8 +17,11 @@ class StudentModelTest(TestCase):
         """Test that regenerating check-in token updates the database."""
         student = Student.objects.create(name="Test Student")
         old_token = student.check_in_token
+        student.check_in_token_active = False
+        student.save(update_fields=['check_in_token_active'])
         student.regenerate_check_in_token()
         self.assertNotEqual(student.check_in_token, old_token)
+        self.assertTrue(student.check_in_token_active)
 
 
 from django.contrib.auth.models import AnonymousUser
@@ -56,34 +59,63 @@ class StudentSerializerTest(TestCase):
         self.other_student_user = User.objects.create_user(username="student_user2", role="student", clerk_id="s_2")
         self.terminal_user = User.objects.create_user(username="terminal_user", role="terminal", clerk_id="t_1")
         self.teacher_user = User.objects.create_user(username="teacher_user", role="teacher", clerk_id="te_1")
+        self.staff_user = User.objects.create_user(username="staff_user", role="staff", clerk_id="st_1")
         
         self.student = Student.objects.create(name="Owned Student", user=self.student_user)
         from people.serializers import StudentSerializer
         self.serializer_class = StudentSerializer
 
-    def test_token_visible_to_student_owner(self):
+    def test_token_omitted_from_list_context_even_for_staff(self):
+        """SEC-H2: list responses must not include check_in_token."""
         request = self.factory.get('/api/v1/students/')
-        request.user = self.student_user
-        serializer = self.serializer_class(self.student, context={'request': request})
-        self.assertIn('check_in_token', serializer.data)
-
-    def test_token_hidden_from_other_students(self):
-        request = self.factory.get('/api/v1/students/')
-        request.user = self.other_student_user
+        request.user = self.staff_user
         serializer = self.serializer_class(self.student, context={'request': request})
         self.assertNotIn('check_in_token', serializer.data)
 
-    def test_token_visible_to_terminal_role(self):
-        request = self.factory.get('/api/v1/students/')
-        request.user = self.terminal_user
-        serializer = self.serializer_class(self.student, context={'request': request})
+    def test_token_visible_to_student_owner_when_opted_in(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.student_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
         self.assertIn('check_in_token', serializer.data)
+
+    def test_token_hidden_from_other_students_even_when_opted_in(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.other_student_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        self.assertNotIn('check_in_token', serializer.data)
+
+    def test_token_hidden_from_terminal_role(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.terminal_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        self.assertNotIn('check_in_token', serializer.data)
 
     def test_token_hidden_from_teacher_role(self):
-        request = self.factory.get('/api/v1/students/')
+        request = self.factory.get('/api/v1/students/1/')
         request.user = self.teacher_user
-        serializer = self.serializer_class(self.student, context={'request': request})
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
         self.assertNotIn('check_in_token', serializer.data)
+
+    def test_token_visible_to_staff_on_detail_opt_in(self):
+        request = self.factory.get('/api/v1/students/1/')
+        request.user = self.staff_user
+        serializer = self.serializer_class(
+            self.student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        self.assertIn('check_in_token', serializer.data)
 
 
 from people.models import Teacher, Staff
@@ -167,5 +199,50 @@ class SchoolCodeValidationTest(TestCase):
     def test_staff_school_code_required(self):
         serializer = StaffSerializer(data={'name': 'Staff Test', 'school_code': 'YWM'})
         self.assertTrue(serializer.is_valid())
+
+
+from rest_framework import status
+from rest_framework.test import APITestCase, APIClient
+
+
+class PeoplePageBoundaryListTests(APITestCase):
+    """page_size=2 → page1/page2 disjoint IDs, stable count for people lists."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="people_page_admin", role="admin", clerk_id="clerk_people_page_1"
+        )
+        for i in range(5):
+            Student.objects.create(name=f"Page Student {i}")
+            Teacher.objects.create(name=f"Page Teacher {i}")
+            User.objects.create_user(
+                username=f"page_user_{i}",
+                role="staff",
+                clerk_id=f"clerk_people_page_u_{i}",
+            )
+
+    def _assert_page_boundary(self, url):
+        self.client.force_authenticate(user=self.admin)
+        page1 = self.client.get(url, {"page": 1, "page_size": 2})
+        page2 = self.client.get(url, {"page": 2, "page_size": 2})
+        self.assertEqual(page1.status_code, status.HTTP_200_OK, msg=url)
+        self.assertEqual(page2.status_code, status.HTTP_200_OK, msg=url)
+        self.assertEqual(page1.data["count"], page2.data["count"], msg=url)
+        self.assertGreaterEqual(page1.data["count"], 4, msg=url)
+        self.assertEqual(len(page1.data["results"]), 2, msg=url)
+        self.assertEqual(len(page2.data["results"]), 2, msg=url)
+        ids1 = {row["id"] for row in page1.data["results"]}
+        ids2 = {row["id"] for row in page2.data["results"]}
+        self.assertTrue(ids1.isdisjoint(ids2), msg=f"{url}: {ids1} vs {ids2}")
+
+    def test_students_page_boundary(self):
+        self._assert_page_boundary("/api/v1/students/")
+
+    def test_teachers_page_boundary(self):
+        self._assert_page_boundary("/api/v1/teachers/")
+
+    def test_users_page_boundary(self):
+        self._assert_page_boundary("/api/v1/users/")
 
 

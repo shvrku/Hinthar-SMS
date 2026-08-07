@@ -12,6 +12,7 @@ router.register(r'adhoc-session-attendances', views.AdHocSessionAttendanceViewSe
 urlpatterns = [
     # Explicit paths first, before the router, so they take priority
     path('stats/', views.StatsView.as_view(), name='stats'),
+    path('check-ins/lookup/', views.CheckInLookupView.as_view(), name='checkin-lookup'),
     path('check-ins/qr/', views.QRCheckInView.as_view(), name='checkin-qr'),
     path('check-ins/manual/', views.ManualCheckInView.as_view(), name='checkin-manual'),
     path('sessions/generate/<int:class_id>/', views.GenerateClassSessionsView.as_view(), name='generate-class-sessions'),

@@ -1,53 +1,95 @@
 # Hinthar SMS — School Management System
 
-An API-first school management system for class organization, timetabling, session and attendance tracking, and teacher payroll.
+API-first school management for people, classes, timetabling, sessions, attendance, and campus check-in.
 
-## API Endpoints
+**Payroll is archived / out of scope** for the current product cycle (`payroll/` app is unmounted).
 
-All endpoints are versioned under `/api/v1/`. Full interactive docs at `/api/v1/docs/` (Swagger UI).
+## Standards & plans
 
-| Endpoint | Description |
-|---|---|
-| `GET /api/v1/me` | Current user profile |
-| `/api/v1/teachers/` | Teacher CRUD |
-| `/api/v1/students/` | Student CRUD |
-| `/api/v1/staff/` | Staff CRUD |
-| `/api/v1/classes/` | Class & enrollment management |
-| `/api/v1/subjects/` | Subject management |
-| `/api/v1/timetable-slots/` | Recurring timetable definitions |
-| `/api/v1/timetable-students/` | Per-slot student assignments |
-| `/api/v1/sessions/` | Session generation, status & attendance |
-| `/api/v1/session-attendances/` | Per-student attendance records |
-| `/api/v1/check-ins/` | Daily check-in records |
-| `/api/v1/payslips/` | Payroll preview, confirmation & history |
-| `/api/v1/adjustments/` | Payroll corrections |
-| `/api/v1/stats/` | System-wide record counts |
+| Doc | Purpose |
+|-----|---------|
+| [`docs/API_STANDARDS.md`](docs/API_STANDARDS.md) | Route naming, pagination, bulk/fetch/aggregate patterns, role hierarchy |
+| [`docs/SCALING_IMPLEMENTATION_PLAN.md`](docs/SCALING_IMPLEMENTATION_PLAN.md) | Status + phased migration (full tables in Dashboard copy) |
+
+
+Interactive OpenAPI: `/api/v1/docs/` (Swagger UI).
+
+## API Endpoints (live)
+
+All under `/api/v1/`.
+
+
+| Endpoint                                                                           | Description                                        |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `GET /me/`                                                                         | Current user profile                               |
+| `/users/`, `/audit-logs/`                                                          | Accounts / audit (admin)                           |
+| `/teachers/`, `/students/`, `/staff/`, `/subjects/`                                | People & catalog (+ `bulk_create` / `bulk_delete`) |
+| `/classes/`, `/class-students/`                                                    | Cohorts & enrollment                               |
+| `/timetable-slots/`                                                                | Recurring weekly slots                             |
+| `/timetable/teacher/{id}/`, `/timetable/class/{id}/`                               | Scoped timetable helpers                           |
+| `/sessions/`, `/session-attendances/`                                              | Dated sessions & lesson attendance                 |
+| `GET /attendance/matrix/`                                                          | Class attendance aggregate (scoped)                |
+| `/adhoc-sessions/`, `/adhoc-session-attendances/`, `GET /adhoc-attendance/matrix/` | Tutoring / ad-hoc                                  |
+| `/check-ins/` (+ `qr/`, `manual/`)                                                 | Daily campus check-in                              |
+| `GET /stats/`                                                                      | System-wide counts                                 |
+
+
+
 
 ## What It Does
 
-- **People Management** — Manage teachers, students, staff, and subjects.
-- **Class Structure** — Organize students into classes by education level and cohort.
-- **Timetabling** — Define recurring weekly schedules with overlap validation. Support for stream splits when clashes occur.
-- **Sessions & Attendance** — Batch-generate dated sessions from timetable templates. Teachers record session status and student attendance.
-- **Teacher Payroll** — Preview-then-confirm workflow with frozen payslip snapshots. Corrections handled through a dedicated adjustments system.
-- **Authentication & Permissions** — Clerk-based authentication with role-based access control (admin, teacher, staff, terminal).
-- **Audit Trail** — Automatic logging of payslip and session changes for accountability.
+- **People** — Teachers, students, staff, subjects
+- **Classes** — Cohorts and enrollment
+- **Timetable → sessions** — Recurring slots generate dated sessions
+- **Lesson attendance** — Per-session status + class matrices
+- **Campus check-in** — QR / manual daily presence
+- **Auth** — Clerk JWT; roles on Django `User` (`admin` > `staff` > `terminal` > `teacher` / `student`)
+
+
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Backend | Django + Django REST Framework |
-| Database | PostgreSQL |
-| Auth | Clerk (OIDC/JWT) |
-| API Docs | drf-spectacular (OpenAPI 3) |
+
+| Layer    | Technology                       |
+| -------- | -------------------------------- |
+| Backend  | Django 5 + Django REST Framework |
+| Database | PostgreSQL                       |
+| Auth     | Clerk (OIDC/JWT)                 |
+| API Docs | drf-spectacular (OpenAPI 3)      |
+
+
+
 
 ## Roadmap
 
-- [ ] **Payroll Management** — Payroll periods, bulk payslip generation, payment tracking, and reporting.
-- [ ] **Timetable & Session Logic** — Polish session generation edge cases, handle cancellations and rescheduling.
-- [ ] **Academic Records** — Exams, results, and report cards.
+See [`docs/SCALING_IMPLEMENTATION_PLAN.md`](docs/SCALING_IMPLEMENTATION_PLAN.md) for live status. High level:
+
+- [x] Role helpers + frontend gates
+- [x] List pagination + server `q` search
+- [x] Attendance matrix filters + route split + ad-hoc Add Students
+- [x] Matrix `class_id` required (400) + Sessions Take roll deep links
+- [x] Remove payroll residue from live models
+- [x] Check-in correction UI (`DELETE /check-ins/{id}/` + `/check-in/corrections`)
+- [ ] Check-in overview redesign (class-first, checked-in / missing)
+- [ ] QR token activate / deactivate
+- [x] OpenAPI / bulk hygiene (Phase 5) — global exception handler deferred
+- [ ] Teacher queryset scoping
+- [ ] Analytics aggregates — future
+- [ ] Academic records (exams / results) — future
+
+
+## OpenAPI schema
+
+Interactive docs: `/api/v1/docs/` (Swagger UI).
+
+Regenerate the checked-in schema file when the environment has DB settings available:
+
+```bash
+python manage.py spectacular --file docs/openapi-schema.yml
+```
+
+
 
 ## License
 
-Private — intended for internal school administration use.
+Private — internal school administration use.

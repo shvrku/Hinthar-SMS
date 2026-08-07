@@ -85,7 +85,10 @@ class TimetableSlot(models.Model):
             raise ValidationError('end_time must be after start_time.')
 
     def save(self, *args, **kwargs):
-        self.full_clean()
+        # Skip full_clean when only non-time fields change (BUG-M1)
+        update_fields = kwargs.get('update_fields')
+        if update_fields is None or {'start_time', 'end_time', 'day_of_week'} & set(update_fields):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     class Meta:

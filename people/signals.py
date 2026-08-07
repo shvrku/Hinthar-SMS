@@ -20,38 +20,29 @@ def _log_action(user, model_name, record_id, action, field_name=None, old_value=
     )
 
 
-# ---- Payslip auditing (Archived) ----
+def _capture_old_status(sender, instance):
+    """
+    Prefer status loaded via Model.from_db (_old_status already set).
+    Only hit the DB when the instance was constructed without from_db
+    (e.g. Session(pk=…) then field assign) and status may have changed.
+    """
+    if getattr(instance, '_skip_audit', False):
+        return
+    if hasattr(instance, '_old_status'):
+        return
+    if instance.pk:
+        instance._old_status = (
+            sender.objects.filter(pk=instance.pk).values_list('status', flat=True).first()
+        )
+    else:
+        instance._old_status = None
 
-# @receiver(post_save, sender='payroll.Payslip')
-# def audit_payslip_post_save(sender, instance, created, **kwargs):
-#     action = 'create' if created else 'update'
-#     _log_action(
-#         user=getattr(instance, '_audit_user', None),
-#         model_name='Payslip',
-#         record_id=instance.id,
-#         action=action,
-#         new_value=f"status={instance.status}, net_pay={instance.net_pay}, gross_pay={instance.gross_pay}",
-#     )
 
-
-# ---- Session auditing (status & paid changes) ----
+# ---- Session auditing (status changes) ----
 
 @receiver(pre_save, sender='class_sessions.Session')
 def audit_session_pre_save(sender, instance, **kwargs):
-    """Capture old values before save for status/paid field changes."""
-    if getattr(instance, '_skip_audit', False):
-        return
-    if instance.pk:
-        try:
-            old = sender.objects.get(pk=instance.pk)
-            instance._old_status = old.status
-            instance._old_paid = old.paid
-        except sender.DoesNotExist:
-            instance._old_status = None
-            instance._old_paid = None
-    else:
-        instance._old_status = None
-        instance._old_paid = None
+    _capture_old_status(sender, instance)
 
 
 @receiver(post_save, sender='class_sessions.Session')
@@ -66,10 +57,9 @@ def audit_session_post_save(sender, instance, created, **kwargs):
             action='create',
             new_value=f"status={instance.status}, start={instance.start_time:%d/%m/%y %H:%M}",
         )
+        instance._old_status = instance.status
     else:
-        # Check status change
         old_status = getattr(instance, '_old_status', None)
-        old_paid = getattr(instance, '_old_paid', None)
 
         if old_status is not None and old_status != instance.status:
             _log_action(
@@ -81,34 +71,12 @@ def audit_session_post_save(sender, instance, created, **kwargs):
                 old_value=old_status,
                 new_value=instance.status,
             )
-        if old_paid is not None and old_paid != instance.paid:
-            _log_action(
-                user=getattr(instance, '_audit_user', None),
-                model_name='Session',
-                record_id=instance.id,
-                action='update',
-                field_name='paid',
-                old_value=old_paid,
-                new_value=instance.paid,
-            )
+        instance._old_status = instance.status
 
 
 @receiver(pre_save, sender='class_sessions.AdHocSession')
 def audit_adhoc_session_pre_save(sender, instance, **kwargs):
-    """Capture old values before save for status/paid field changes in AdHocSession."""
-    if getattr(instance, '_skip_audit', False):
-        return
-    if instance.pk:
-        try:
-            old = sender.objects.get(pk=instance.pk)
-            instance._old_status = old.status
-            instance._old_paid = old.paid
-        except sender.DoesNotExist:
-            instance._old_status = None
-            instance._old_paid = None
-    else:
-        instance._old_status = None
-        instance._old_paid = None
+    _capture_old_status(sender, instance)
 
 
 @receiver(post_save, sender='class_sessions.AdHocSession')
@@ -123,10 +91,9 @@ def audit_adhoc_session_post_save(sender, instance, created, **kwargs):
             action='create',
             new_value=f"status={instance.status}, date={instance.date:%d/%m/%y}, start={instance.start_time:%H:%M}",
         )
+        instance._old_status = instance.status
     else:
-        # Check status change
         old_status = getattr(instance, '_old_status', None)
-        old_paid = getattr(instance, '_old_paid', None)
 
         if old_status is not None and old_status != instance.status:
             _log_action(
@@ -138,13 +105,4 @@ def audit_adhoc_session_post_save(sender, instance, created, **kwargs):
                 old_value=old_status,
                 new_value=instance.status,
             )
-        if old_paid is not None and old_paid != instance.paid:
-            _log_action(
-                user=getattr(instance, '_audit_user', None),
-                model_name='AdHocSession',
-                record_id=instance.id,
-                action='update',
-                field_name='paid',
-                old_value=old_paid,
-                new_value=instance.paid,
-            )
+        instance._old_status = instance.status

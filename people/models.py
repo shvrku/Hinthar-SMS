@@ -5,6 +5,7 @@ from django.db import models
 
 class User(AbstractUser):
     ROLE_CHOICES = [
+        ('pending', 'Pending'),
         ('admin', 'Admin'),
         ('staff', 'Staff'),
         ('teacher', 'Teacher'),
@@ -13,7 +14,8 @@ class User(AbstractUser):
     ]
     
     clerk_id = models.CharField(max_length=255, unique=True, db_index=True)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='student')
+    # New Clerk sign-ups JIT-provision as pending until an admin assigns a role.
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='pending')
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -44,9 +46,7 @@ class Teacher(models.Model):
     
     name = models.CharField(max_length=255)
     employment_type = models.CharField(max_length=20, choices=EMPLOYMENT_TYPES, default='tutor')
-    default_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     contact = models.CharField(max_length=500, blank=True, null=True)
-    bank_details = models.TextField(blank=True, null=True)
     join_date = models.DateField(default=timezone.now)
     school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
     unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)
@@ -75,6 +75,7 @@ class Student(models.Model):
     enrollment_date = models.DateField(auto_now_add=True)
     contact = models.CharField(max_length=500, blank=True, null=True)
     check_in_token = models.CharField(max_length=64, unique=True, blank=True, editable=False)
+    check_in_token_active = models.BooleanField(default=True)
     school_code = models.CharField(max_length=10, choices=SCHOOL_CHOICES, default='HIS', blank=True)
     unique_code = models.CharField(max_length=50, unique=True, db_index=True, editable=False, null=True, blank=True)
     exam_candidate_number = models.CharField(max_length=50, null=True, blank=True, unique=True, db_index=True)
@@ -97,7 +98,8 @@ class Student(models.Model):
 
     def regenerate_check_in_token(self):
         self.check_in_token = secrets.token_urlsafe(32)
-        self.save(update_fields=['check_in_token'])
+        self.check_in_token_active = True
+        self.save(update_fields=['check_in_token', 'check_in_token_active'])
 
     def __str__(self):
         return self.name

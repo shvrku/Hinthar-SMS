@@ -59,7 +59,8 @@ SUBJECTS = [
 
 # ──────────────────────────────────────────────
 # Teachers — HoYoverse + Kuro Games characters
-# Format: (name, employment_type, default_rate, [subjects_they_teach])
+# Format: (name, employment_type, rate_unused, [subjects_they_teach])
+# rate kept in tuple shape for subject list at index 3; not stored on Teacher.
 # ──────────────────────────────────────────────
 TEACHERS = [
     # Genshin Impact
@@ -266,7 +267,7 @@ class Command(BaseCommand):
         self.stdout.write('\n--- Creating Teachers ---')
         from people.utils import generate_unique_code
         teacher_objs = [
-            Teacher(name=t[0], employment_type=t[1], default_rate=t[2])
+            Teacher(name=t[0], employment_type=t[1])
             for t in TEACHERS
         ]
         for t in teacher_objs:
@@ -394,8 +395,6 @@ class Command(BaseCommand):
                         else:
                             status = 'scheduled'
 
-                        paid = status == 'completed' and random.random() < 0.7
-
                         session = Session(
                             timetable_slot=slot,
                             teacher=slot.teacher,
@@ -403,7 +402,6 @@ class Command(BaseCommand):
                             start_time=start_dt,
                             end_time=end_dt,
                             status=status,
-                            paid=paid,
                         )
                         session_bulk.append(session)
 

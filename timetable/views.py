@@ -1,8 +1,7 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
 from django.db.models import Q
@@ -11,29 +10,85 @@ from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
-from people.permissions import IsAdmin, IsStaffOrAdmin, IsAdminOrReadOnlyAuthenticated, IsStaffOrAdminOrReadOnlyAuthenticated
+from people.permissions import IsStaffOrAbove
 from people.views import BulkOperationsMixin
+from people.student_analytics import VALID_RANGES
+from timetable.class_analytics import build_class_attendance_summary
+from rest_framework import status
+from rest_framework.decorators import action
 
 
 class ClassViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Class.objects.order_by('id')
     serializer_class = ClassSerializer
-    permission_classes = [IsStaffOrAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    pagination_class = None  # small catalog — used as dropdown options
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'range',
+                OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Preset window: week | month | all',
+                enum=sorted(VALID_RANGES),
+            ),
+        ],
+        summary='Class campus + lesson attendance summary',
+        description=(
+            'Staff+. Lesson roll and campus check-in for enrolled students are separate objects. '
+            'Never blend them into a single rate.'
+        ),
+    )
+    @action(detail=True, methods=['get'], url_path='attendance-summary',
+            permission_classes=[IsStaffOrAbove])
+    def attendance_summary(self, request, pk=None):
+        class_obj = self.get_object()
+        range_key = (request.query_params.get('range') or '').strip().lower()
+        if range_key not in VALID_RANGES:
+            return Response(
+                {'error': f'range must be one of: {", ".join(sorted(VALID_RANGES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(build_class_attendance_summary(class_obj, range_key))
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'class_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Canonical class filter.',
+            ),
+            OpenApiParameter(
+                'class_obj_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                deprecated=True,
+                description='Deprecated alias for class_id.',
+            ),
+            OpenApiParameter('student_id', OpenApiTypes.INT, location=OpenApiParameter.QUERY, required=False),
+        ],
+    ),
+)
 class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = ClassStudent.objects.select_related('class_obj', 'student__user').order_by('id')
     serializer_class = ClassStudentSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
     def get_queryset(self):
         qs = super().get_queryset()
-        class_obj_id = self.request.query_params.get('class_obj_id')
+        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
         student_id = self.request.query_params.get('student_id')
-        if class_obj_id:
-            qs = qs.filter(class_obj_id=class_obj_id)
+        if class_id:
+            qs = qs.filter(class_obj_id=class_id)
         if student_id:
             qs = qs.filter(student_id=student_id)
         return qs
@@ -42,9 +97,17 @@ class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
 class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').order_by('id')
     serializer_class = TimetableSlotSerializer
-    permission_classes = [IsAdminOrReadOnlyAuthenticated]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['id']
-    
+    pagination_class = None  # scoped by class in practice; keep full for timetable editors
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
+        if class_id:
+            qs = qs.filter(class_obj_id=class_id)
+        return qs
+
     def _validate_no_overlap(self, day, start, end, teacher, room, exclude_pk=None):
         """Check teacher and room double-booking. Raises ValidationError if overlap found."""
         from rest_framework.exceptions import ValidationError
@@ -84,10 +147,9 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
                 'timetable_slot_id': session.timetable_slot_id,
                 'teacher_id': session.teacher_id,
                 'class_obj_id': session.class_obj_id,
-                'start_time': session.start_time.strftime('%d/%m/%y %H:%M:%S'),
-                'end_time': session.end_time.strftime('%d/%m/%y %H:%M:%S'),
+                'start_time': session.start_time.isoformat(),
+                'end_time': session.end_time.isoformat(),
                 'status': session.status,
-                'paid': session.paid,
             }
         return {
             'total_created': len(created),
@@ -174,7 +236,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
 
 
 class TeacherTimetableView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Teacher timetable",
@@ -193,7 +255,7 @@ class TeacherTimetableView(APIView):
 
 
 class ClassTimetableView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaffOrAbove]
 
     @extend_schema(
         summary="Class timetable",

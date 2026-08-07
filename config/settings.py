@@ -19,7 +19,8 @@ load_dotenv(BASE_DIR / '.env')
 SECRET_KEY = os.environ["SECRET_KEY"]  # No fallback — .env must provide this
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DEBUG", "True").lower() == "true"
+# Fail closed: unset DEBUG must never enable debug/mock paths.
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host.strip()]
 # Allow Render's automatic hostname
@@ -61,14 +62,17 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# CORS Configuration — allow requests from the Next.js admin frontend
+# CORS — fully env-driven. Localhost is NOT auto-trusted in production.
+# Dev convenience: when DEBUG and CORS_ALLOWED_ORIGINS is empty, allow local Next.js.
 _cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-] + [o.strip() for o in _cors_env.split(",") if o.strip()]
+CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()]
+if DEBUG and not CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ]
 CORS_ALLOW_CREDENTIALS = True
 
 ROOT_URLCONF = 'config.urls'
@@ -100,6 +104,24 @@ DATABASES = {
         conn_health_checks=True,
     )
 }
+
+# PERF-M6: shared cache across workers when REDIS_URL is set (Render/multi-dyno).
+# Falls back to local-memory (fine for single process / local DEBUG).
+_redis_url = os.getenv("REDIS_URL", "").strip()
+if _redis_url:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _redis_url,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'hinthar-sms',
+        }
+    }
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -148,7 +170,7 @@ REST_FRAMEWORK = {
         'people.authentication.ClerkJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'people.permissions.IsAuthenticatedNonTerminal',
+        'people.permissions.IsStaffOrAbove',
     ],
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.ScopedRateThrottle',
@@ -156,14 +178,14 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'checkin': '10/minute',
     },
-    'DEFAULT_PAGINATION_CLASS': None,
+    'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardPageNumberPagination',
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
 # OpenAPI Schema Documentation Configuration
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Hinthar School Management System API',
-    'DESCRIPTION': 'Core API for managing classes, timetabling, sessions, attendance, and payroll.',
+    'DESCRIPTION': 'Core API for managing classes, timetabling, sessions, attendance, and check-in.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'ENUM_NAME_OVERRIDES': {
@@ -176,10 +198,13 @@ SPECTACULAR_SETTINGS = {
 CLERK_FRONTEND_API = os.getenv("CLERK_FRONTEND_API", "")
 CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL", "")
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY", "")
-CLERK_JWT_AUDIENCE = os.getenv("CLERK_JWT_AUDIENCE", "")  # Set to verify JWT audience claim
+# Issuer to verify on session JWTs (defaults to CLERK_FRONTEND_API).
+CLERK_JWT_ISSUER = os.getenv("CLERK_JWT_ISSUER", "") or os.getenv("CLERK_FRONTEND_API", "")
+# Audience claim — required when DEBUG=False so tokens are bound to this API.
+CLERK_JWT_AUDIENCE = os.getenv("CLERK_JWT_AUDIENCE", "")
 
-# Mock Authentication (development only — requires DEBUG=True)
-ENABLE_MOCK_AUTH = os.getenv("ENABLE_MOCK_AUTH", "true" if DEBUG else "false").lower() == "true"
+# Mock Authentication — opt-in only. Requires BOTH DEBUG=True and ENABLE_MOCK_AUTH=true.
+ENABLE_MOCK_AUTH = os.getenv("ENABLE_MOCK_AUTH", "false").lower() == "true"
 
 # Logging
 LOGGING = {
