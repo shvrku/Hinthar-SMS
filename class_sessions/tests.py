@@ -61,6 +61,47 @@ class QRCheckInViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Invalid check-in token")
 
+    def test_qr_checkin_rejects_deactivated_token(self):
+        self.student.check_in_token_active = False
+        self.student.save(update_fields=["check_in_token_active"])
+        self.client.force_authenticate(user=self.terminal_user)
+        response = self.client.post(
+            "/api/v1/check-ins/qr/",
+            {"check_in_token": "valid_check_in_token_123"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"], "Check-in token is deactivated")
+        self.assertFalse(CheckIn.objects.filter(student=self.student).exists())
+
+    def test_lookup_and_manual_reject_deactivated_token(self):
+        self.student.check_in_token_active = False
+        self.student.save(update_fields=["check_in_token_active"])
+        self.client.force_authenticate(user=self.terminal_user)
+
+        qr_lookup = self.client.post(
+            "/api/v1/check-ins/lookup/",
+            {"check_in_token": "valid_check_in_token_123"},
+            format="json",
+        )
+        self.assertEqual(qr_lookup.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(qr_lookup.data["student"]["id"], self.student.id)
+
+        code_lookup = self.client.post(
+            "/api/v1/check-ins/lookup/",
+            {"unique_code": self.student.unique_code},
+            format="json",
+        )
+        self.assertEqual(code_lookup.status_code, status.HTTP_403_FORBIDDEN)
+
+        manual = self.client.post(
+            "/api/v1/check-ins/manual/",
+            {"student_id": self.student.id},
+            format="json",
+        )
+        self.assertEqual(manual.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(CheckIn.objects.filter(student=self.student).exists())
+
 
 class GenerateClassSessionsViewTests(APITestCase):
     def setUp(self):
