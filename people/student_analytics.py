@@ -9,6 +9,7 @@ from django.db.models import Count, F
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
+from class_sessions.datetime_bounds import aware_day_range
 from class_sessions.models import CheckIn, SessionAttendance, AdHocSessionAttendance
 
 
@@ -59,6 +60,7 @@ def build_student_attendance_summary(student, range_key: str):
         raise ValueError(f'range must be one of: {", ".join(sorted(VALID_RANGES))}')
 
     date_from, date_to = resolve_student_analytics_range(range_key, student.enrollment_date)
+    start_dt, end_dt = aware_day_range(date_from, date_to)
 
     check_in_dates = set(
         CheckIn.objects.filter(
@@ -84,8 +86,8 @@ def build_student_attendance_summary(student, range_key: str):
 
     session_base = SessionAttendance.objects.filter(
         student=student,
-        session__start_time__date__gte=date_from,
-        session__start_time__date__lte=date_to,
+        session__start_time__gte=start_dt,
+        session__start_time__lt=end_dt,
     )
 
     for row in session_base.values('status').annotate(c=Count('id')):

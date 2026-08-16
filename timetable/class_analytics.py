@@ -1,10 +1,12 @@
 from datetime import date, timedelta
 
-from django.db.models import Min
+from django.db.models import Count, F, Min
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 
+from class_sessions.datetime_bounds import aware_day_range
 from class_sessions.models import CheckIn, SessionAttendance
-from people.student_analytics import VALID_RANGES, _iter_dates
+from people.student_analytics import VALID_RANGES, _bump, _empty_status, _iter_dates, _STATUS_KEYS
 
 
 def resolve_class_analytics_range(range_key: str, class_obj) -> tuple[date, date]:
@@ -32,94 +34,108 @@ def build_class_attendance_summary(class_obj, range_key: str):
         raise ValueError(f'range must be one of: {", ".join(sorted(VALID_RANGES))}')
 
     date_from, date_to = resolve_class_analytics_range(range_key, class_obj)
+    # Keep full since-first-session daily series (range=all semantics unchanged).
     calendar_days = list(_iter_dates(date_from, date_to))
+    start_dt, end_dt = aware_day_range(date_from, date_to)
 
-    enrolled_ids = list(
-        class_obj.class_students.values_list('student_id', flat=True)
-    )
-    enrolled_count = len(enrolled_ids)
+    enrolled_count = class_obj.class_students.count()
 
-    check_in_qs = CheckIn.objects.filter(
-        student_id__in=enrolled_ids,
-        date__gte=date_from,
-        date__lte=date_to,
-    )
-    check_ins_by_date = {}
-    for d, student_id in check_in_qs.values_list('date', 'student_id'):
-        check_ins_by_date.setdefault(d, set()).add(student_id)
+    check_ins_by_date = {
+        row['date']: row['c']
+        for row in (
+            CheckIn.objects.filter(
+                student__enrolled_classes__class_obj=class_obj,
+                date__gte=date_from,
+                date__lte=date_to,
+            )
+            .values('date')
+            .annotate(c=Count('student_id', distinct=True))
+        )
+    }
 
     campus_daily = [
         {
             'date': d.isoformat(),
-            'checked_in': len(check_ins_by_date.get(d, ())),
+            'checked_in': check_ins_by_date.get(d, 0),
             'enrolled': enrolled_count,
         }
         for d in calendar_days
     ]
     total_campus_slots = enrolled_count * len(calendar_days)
-    total_check_ins = sum(len(s) for s in check_ins_by_date.values())
+    total_check_ins = sum(check_ins_by_date.values())
 
-    session_rows = (
-        SessionAttendance.objects.filter(
-            session__class_obj=class_obj,
-            session__start_time__date__gte=date_from,
-            session__start_time__date__lte=date_to,
-        )
-        .select_related(
-            'session__teacher',
-            'session__timetable_slot__subject',
-            'session__actual_teacher',
-        )
+    session_base = SessionAttendance.objects.filter(
+        session__class_obj=class_obj,
+        session__start_time__gte=start_dt,
+        session__start_time__lt=end_dt,
     )
 
-    status_counts = {'present': 0, 'late': 0, 'absent': 0, 'excused': 0}
-    trend_map = {}
+    status_counts = _empty_status()
+    for row in session_base.values('status').annotate(c=Count('id')):
+        _bump(status_counts, row['status'], row['c'])
+
     by_subject_map = {}
-    by_teacher_map = {}
-
-    for row in session_rows:
-        status = row.status if row.status in status_counts else 'absent'
-        status_counts[status] += 1
-        session_date = row.session.start_time.date().isoformat()
-        bucket = trend_map.setdefault(
-            session_date, {'present': 0, 'late': 0, 'absent': 0, 'excused': 0}
+    for row in (
+        session_base
+        .values(
+            'status',
+            subject_id=F('session__timetable_slot__subject_id'),
+            subject_name=F('session__timetable_slot__subject__name'),
         )
-        bucket[status] += 1
-
-        subject = getattr(row.session.timetable_slot, 'subject', None)
-        subject_key = subject.id if subject else 0
-        subject_label = subject.name if subject else 'Unknown'
-        subject_entry = by_subject_map.setdefault(
+        .annotate(c=Count('id'))
+    ):
+        subject_key = row['subject_id'] or 0
+        entry = by_subject_map.setdefault(
             subject_key,
             {
-                'subject_id': subject.id if subject else None,
-                'subject_label': subject_label,
-                'present': 0,
-                'late': 0,
-                'absent': 0,
-                'excused': 0,
+                'subject_id': row['subject_id'],
+                'subject_label': row['subject_name'] or 'Unknown',
+                **_empty_status(),
                 'total': 0,
             },
         )
-        subject_entry[status] += 1
-        subject_entry['total'] += 1
+        _bump(entry, row['status'], row['c'])
+        entry['total'] += row['c']
 
-        teacher = row.session.actual_teacher or row.session.teacher
-        teacher_key = teacher.id if teacher else 0
-        teacher_entry = by_teacher_map.setdefault(
+    by_teacher_map = {}
+    for row in (
+        session_base
+        .values(
+            'status',
+            assigned_id=F('session__teacher_id'),
+            actual_id=F('session__actual_teacher_id'),
+            assigned_name=F('session__teacher__name'),
+            actual_name=F('session__actual_teacher__name'),
+        )
+        .annotate(c=Count('id'))
+    ):
+        teacher_id = row['actual_id'] or row['assigned_id']
+        teacher_name = row['actual_name'] or row['assigned_name'] or 'Unknown'
+        teacher_key = teacher_id or 0
+        entry = by_teacher_map.setdefault(
             teacher_key,
             {
-                'teacher_id': teacher.id if teacher else None,
-                'teacher_name': teacher.name if teacher else 'Unknown',
-                'present': 0,
-                'late': 0,
-                'absent': 0,
-                'excused': 0,
+                'teacher_id': teacher_id,
+                'teacher_name': teacher_name,
+                **_empty_status(),
                 'total': 0,
             },
         )
-        teacher_entry[status] += 1
-        teacher_entry['total'] += 1
+        _bump(entry, row['status'], row['c'])
+        entry['total'] += row['c']
+
+    trend_map = {}
+    for row in (
+        session_base
+        .annotate(session_date=TruncDate('session__start_time'))
+        .values('session_date', 'status')
+        .annotate(c=Count('id'))
+    ):
+        if row['session_date'] is None:
+            continue
+        day_key = row['session_date'].isoformat()
+        bucket = trend_map.setdefault(day_key, _empty_status())
+        _bump(bucket, row['status'], row['c'])
 
     total_sessions = sum(status_counts.values())
     attended = status_counts['present'] + status_counts['late']
@@ -129,7 +145,7 @@ def build_class_attendance_summary(class_obj, range_key: str):
     lesson_trend = [
         {
             'date': d.isoformat(),
-            **trend_map.get(d.isoformat(), {'present': 0, 'late': 0, 'absent': 0, 'excused': 0}),
+            **trend_map.get(d.isoformat(), _empty_status()),
         }
         for d in calendar_days
         if any(trend_map.get(d.isoformat(), {}).values())
@@ -155,7 +171,7 @@ def build_class_attendance_summary(class_obj, range_key: str):
             'rate_attended': lesson_rate,
             'by_status': [
                 {'status': k, 'count': status_counts[k]}
-                for k in ('present', 'late', 'absent', 'excused')
+                for k in _STATUS_KEYS
             ],
             'by_subject': sorted(by_subject_map.values(), key=lambda x: x['subject_label']),
             'by_teacher': sorted(by_teacher_map.values(), key=lambda x: x['teacher_name']),

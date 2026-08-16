@@ -1,23 +1,24 @@
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
-from people.models import AuditLog
+from people.audit import CATEGORY_SESSION, is_muted, log_event
 
 
-def _log_action(user, model_name, record_id, action, field_name=None, old_value=None, new_value=None):
-    """Helper to create an audit log entry (safe to call outside request-response cycle)."""
-    if not user or not user.is_authenticated:
-        # Use a fallback system user concept or just skip user
-        user = None
-    AuditLog.objects.create(
-        user=user,
-        model_name=model_name,
-        record_id=str(record_id),
-        action=action,
-        field_name=field_name,
-        old_value=str(old_value) if old_value is not None else None,
-        new_value=str(new_value) if new_value is not None else None,
-    )
+def _session_label(instance):
+    class_obj = getattr(instance, 'class_obj', None)
+    start = getattr(instance, 'start_time', None)
+    date_str = start.strftime('%d/%m/%y') if start else ''
+    if class_obj:
+        return f"{class_obj} on {date_str}".strip()
+    return f"#{instance.pk} on {date_str}".strip()
+
+
+def _adhoc_label(instance):
+    subject = getattr(instance, 'subject', None)
+    day = getattr(instance, 'date', None)
+    date_str = day.strftime('%d/%m/%y') if day else ''
+    name = str(subject) if subject else f'#{instance.pk}'
+    return f"{name} on {date_str}".strip()
 
 
 def _capture_old_status(sender, instance):
@@ -26,7 +27,7 @@ def _capture_old_status(sender, instance):
     Only hit the DB when the instance was constructed without from_db
     (e.g. Session(pk=…) then field assign) and status may have changed.
     """
-    if getattr(instance, '_skip_audit', False):
+    if getattr(instance, '_skip_audit', False) or is_muted():
         return
     if hasattr(instance, '_old_status'):
         return
@@ -47,31 +48,50 @@ def audit_session_pre_save(sender, instance, **kwargs):
 
 @receiver(post_save, sender='class_sessions.Session')
 def audit_session_post_save(sender, instance, created, **kwargs):
-    if getattr(instance, '_skip_audit', False):
+    if getattr(instance, '_skip_audit', False) or is_muted():
         return
+    label = _session_label(instance)
     if created:
-        _log_action(
+        log_event(
             user=getattr(instance, '_audit_user', None),
+            category=CATEGORY_SESSION,
+            action='create',
+            summary=f"Created session {label}",
             model_name='Session',
             record_id=instance.id,
-            action='create',
-            new_value=f"status={instance.status}, start={instance.start_time:%d/%m/%y %H:%M}",
+            new_value=instance.status,
         )
         instance._old_status = instance.status
-    else:
-        old_status = getattr(instance, '_old_status', None)
+        return
 
-        if old_status is not None and old_status != instance.status:
-            _log_action(
-                user=getattr(instance, '_audit_user', None),
-                model_name='Session',
-                record_id=instance.id,
-                action='update',
-                field_name='status',
-                old_value=old_status,
-                new_value=instance.status,
-            )
-        instance._old_status = instance.status
+    old_status = getattr(instance, '_old_status', None)
+    if old_status is not None and old_status != instance.status:
+        log_event(
+            user=getattr(instance, '_audit_user', None),
+            category=CATEGORY_SESSION,
+            action='update',
+            summary=f"Marked session {label} as {instance.status}",
+            model_name='Session',
+            record_id=instance.id,
+            field_name='status',
+            old_value=old_status,
+            new_value=instance.status,
+        )
+    instance._old_status = instance.status
+
+
+@receiver(post_delete, sender='class_sessions.Session')
+def audit_session_post_delete(sender, instance, **kwargs):
+    if getattr(instance, '_skip_audit', False) or is_muted():
+        return
+    log_event(
+        user=getattr(instance, '_audit_user', None),
+        category=CATEGORY_SESSION,
+        action='delete',
+        summary=f"Deleted session {_session_label(instance)}",
+        model_name='Session',
+        record_id=instance.pk,
+    )
 
 
 @receiver(pre_save, sender='class_sessions.AdHocSession')
@@ -81,28 +101,47 @@ def audit_adhoc_session_pre_save(sender, instance, **kwargs):
 
 @receiver(post_save, sender='class_sessions.AdHocSession')
 def audit_adhoc_session_post_save(sender, instance, created, **kwargs):
-    if getattr(instance, '_skip_audit', False):
+    if getattr(instance, '_skip_audit', False) or is_muted():
         return
+    label = _adhoc_label(instance)
     if created:
-        _log_action(
+        log_event(
             user=getattr(instance, '_audit_user', None),
+            category=CATEGORY_SESSION,
+            action='create',
+            summary=f"Created ad-hoc session {label}",
             model_name='AdHocSession',
             record_id=instance.id,
-            action='create',
-            new_value=f"status={instance.status}, date={instance.date:%d/%m/%y}, start={instance.start_time:%H:%M}",
+            new_value=instance.status,
         )
         instance._old_status = instance.status
-    else:
-        old_status = getattr(instance, '_old_status', None)
+        return
 
-        if old_status is not None and old_status != instance.status:
-            _log_action(
-                user=getattr(instance, '_audit_user', None),
-                model_name='AdHocSession',
-                record_id=instance.id,
-                action='update',
-                field_name='status',
-                old_value=old_status,
-                new_value=instance.status,
-            )
-        instance._old_status = instance.status
+    old_status = getattr(instance, '_old_status', None)
+    if old_status is not None and old_status != instance.status:
+        log_event(
+            user=getattr(instance, '_audit_user', None),
+            category=CATEGORY_SESSION,
+            action='update',
+            summary=f"Marked ad-hoc session {label} as {instance.status}",
+            model_name='AdHocSession',
+            record_id=instance.id,
+            field_name='status',
+            old_value=old_status,
+            new_value=instance.status,
+        )
+    instance._old_status = instance.status
+
+
+@receiver(post_delete, sender='class_sessions.AdHocSession')
+def audit_adhoc_session_post_delete(sender, instance, **kwargs):
+    if getattr(instance, '_skip_audit', False) or is_muted():
+        return
+    log_event(
+        user=getattr(instance, '_audit_user', None),
+        category=CATEGORY_SESSION,
+        action='delete',
+        summary=f"Deleted ad-hoc session {_adhoc_label(instance)}",
+        model_name='AdHocSession',
+        record_id=instance.pk,
+    )

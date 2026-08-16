@@ -264,6 +264,8 @@ GET /api/v1/attendance/matrix/
 
 Reject `class_id` missing / `all` / `adhoc` with **400**. Unknown integer IDs return **404**.
 
+`records` values are stored statuses only: `present | late | absent | excused`. A missing key or `null` means **unmarked** (no attendance row). Do **not** fill missing cells as `'absent'`. There is no `unmarked` status in the database.
+
 **Response contract** (stable):
 
 ```json
@@ -288,7 +290,7 @@ Reject `class_id` missing / `all` / `adhoc` with **400**. Unknown integer IDs re
       "id": 5,
       "name": "…",
       "user_id": null,
-      "records": { "1": "present|absent|late" }
+      "records": { "1": "present|late|absent|excused" }
     }
   ],
   "attendances": [
@@ -394,7 +396,38 @@ lesson roll stay **separately labeled** in the payload (never one blended rate).
 
 `actual_teacher` on `Session` / `AdHocSession` is nullable: `null` means taught
 as assigned; a set FK means a **substitute**. Same-as-assigned values normalize
-to null on save. Teacher check-in writing this field is deferred.
+to null on save. Staff assign substitutes on Sessions / Find sessions today.
+
+### Overview stats
+
+```
+GET /api/v1/stats/
+```
+
+Staff+ fixed payload (not paginated). Table counts plus:
+
+| Field | Meaning |
+|-------|---------|
+| `trends` | 30-day `{ current, previous, delta, direction }` for `students`, `teachers`, `classes` (stable), `sessions`, `check_ins`. `direction` is `up` / `down` / `stable`. |
+| `student_series` | Cumulative headcount by month-end (`date`, `count`, `new`). Leading empty months trimmed; one baseline month kept. |
+| `recent_activity` | Latest important `AuditLog` rows (~8). Always fresh. Counts / trends / series cached ~5 min (`stats_overview_v2`). |
+
+`recent_activity` **excludes** per-session `Session` / `AdHocSession` creates unless the summary starts with `Generated`.
+
+### Audit logs
+
+```
+GET /api/v1/audit-logs/?page=&page_size=&category=
+```
+
+`IsStaffOrAbove` (not admin-only). Paginated. Optional `category` filter:
+`student | teacher | staff | class | session | check_in | user | other`.
+
+Each row includes `category` and human `summary` plus the historical
+`model_name` / `action` / `field_name` fields. Important events only (people /
+class CRUD, enroll, QR lifecycle, user role/`is_active`, generate-sessions
+summary, session status/delete, check-in create/undo). **Not logged:**
+attendance-matrix cell writes.
 
 ### Student check-in QR token lifecycle
 
@@ -430,6 +463,7 @@ Suggested future routes (if product needs them):
 | `GET /students/{id}/attendance-summary/` | Per-student campus + lesson analytics (**implemented**, see above) |
 | `GET /classes/{id}/attendance-summary/` | Per-class campus + lesson analytics (**implemented**, see above) |
 | `GET /teachers/{id}/attendance-summary/` | Teacher accountability + personal (**implemented**, see above) |
+| `GET /stats/` | School counts + trends + enrollment series + recent activity (**implemented**, see above) |
 | `GET /attendance/session/{id}/roster/` | Single-session roster + statuses (optional split from matrix) |
 
 ---
@@ -449,7 +483,7 @@ Suggested future routes (if product needs them):
 | Success create | 201 | Object or bulk payload |
 | Success other | 200 | Object / envelope / aggregate |
 
-A uniform `{detail, code, fields?}` global handler remains deferred to a later hygiene pass.
+A uniform `{detail, code, fields?}` global handler is optional later hygiene — not required for this cycle.
 
 ---
 

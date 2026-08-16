@@ -136,10 +136,24 @@ class AuditLog(models.Model):
         ('update', 'Update'),
         ('delete', 'Delete'),
     ]
+    CATEGORY_CHOICES = [
+        ('student', 'Student'),
+        ('teacher', 'Teacher'),
+        ('staff', 'Staff'),
+        ('class', 'Class'),
+        ('session', 'Session'),
+        ('check_in', 'Check-in'),
+        ('user', 'User'),
+        ('other', 'Other'),
+    ]
 
     user = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='audit_logs'
     )
+    category = models.CharField(
+        max_length=20, choices=CATEGORY_CHOICES, default='other', db_index=True
+    )
+    summary = models.CharField(max_length=255, blank=True)
     model_name = models.CharField(max_length=255, db_index=True)
     record_id = models.CharField(max_length=255, db_index=True)
     action = models.CharField(max_length=20, choices=ACTION_CHOICES)
@@ -153,8 +167,11 @@ class AuditLog(models.Model):
         verbose_name = 'Audit Log'
         verbose_name_plural = 'Audit Logs'
         indexes = [
-            models.Index(fields=['model_name', 'record_id']),
+            models.Index(fields=['model_name', 'record_id'], name='auditlog_model_record'),
+            models.Index(fields=['category', '-timestamp'], name='auditlog_category_ts'),
         ]
 
     def __str__(self):
+        if self.summary:
+            return f"{self.summary} ({self.user or 'unknown'})"
         return f"{self.get_action_display()} {self.model_name}#{self.record_id} by {self.user or 'unknown'} at {self.timestamp}"

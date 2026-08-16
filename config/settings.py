@@ -183,7 +183,7 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.ScopedRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'checkin': '10/minute',
+        'checkin': '120/minute',
     },
     'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardPageNumberPagination',
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',

@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from class_sessions.models import Session, SessionAttendance
 from timetable.models import TimetableSlot, ClassStudent
+from people.audit import mute_audit
 
 
 def get_month_end(reference_date=None):
@@ -46,37 +47,38 @@ def generate_sessions_for_slots(slots, start_date=None, end_date=None):
     created_sessions = []
     existing_sessions = []
 
-    for slot in slots:
-        current_date = start_date
-        while current_date <= end_date:
-            if current_date.weekday() == slot.day_of_week:
-                start_dt = timezone.make_aware(datetime.combine(current_date, slot.start_time))
-                end_dt = timezone.make_aware(datetime.combine(current_date, slot.end_time))
+    with mute_audit():
+        for slot in slots:
+            current_date = start_date
+            while current_date <= end_date:
+                if current_date.weekday() == slot.day_of_week:
+                    start_dt = timezone.make_aware(datetime.combine(current_date, slot.start_time))
+                    end_dt = timezone.make_aware(datetime.combine(current_date, slot.end_time))
 
-                session, created = Session.objects.get_or_create(
-                    timetable_slot=slot,
-                    start_time=start_dt,
-                    defaults={
-                        'end_time': end_dt,
-                        'teacher': slot.teacher,
-                        'class_obj': slot.class_obj,
-                        'status': 'scheduled',
-                    }
-                )
+                    session, created = Session.objects.get_or_create(
+                        timetable_slot=slot,
+                        start_time=start_dt,
+                        defaults={
+                            'end_time': end_dt,
+                            'teacher': slot.teacher,
+                            'class_obj': slot.class_obj,
+                            'status': 'scheduled',
+                        }
+                    )
 
-                if created:
-                    created_sessions.append(session)
-                    # Auto-create attendance rows from the class roster
-                    students = class_students_map.get(slot.class_obj_id, [])
-                    if students:
-                        SessionAttendance.objects.bulk_create(
-                            [SessionAttendance(session=session, student=s, status='absent')
-                             for s in students],
-                            ignore_conflicts=True,
-                        )
-                else:
-                    existing_sessions.append(session)
+                    if created:
+                        created_sessions.append(session)
+                        # Auto-create attendance rows from the class roster
+                        students = class_students_map.get(slot.class_obj_id, [])
+                        if students:
+                            SessionAttendance.objects.bulk_create(
+                                [SessionAttendance(session=session, student=s, status='absent')
+                                 for s in students],
+                                ignore_conflicts=True,
+                            )
+                    else:
+                        existing_sessions.append(session)
 
-            current_date += timedelta(days=1)
+                current_date += timedelta(days=1)
 
     return created_sessions, existing_sessions

@@ -269,6 +269,28 @@ class AttendanceMatrixViewTests(APITestCase):
         self.assertEqual(len(response.data["students"]), 1)
         self.assertEqual(response.data["students"][0]["records"][str(self.session.id)], "present")
 
+    def test_matrix_missing_row_is_null_existing_absent_stays_absent(self):
+        from timetable.models import ClassStudent
+
+        unmarked = Student.objects.create(name="Unmarked Student", check_in_token="mat_tok_unmarked")
+        pregen = Student.objects.create(name="Pregenerated Absent", check_in_token="mat_tok_pregen")
+        ClassStudent.objects.create(class_obj=self.class_obj, student=unmarked)
+        ClassStudent.objects.create(class_obj=self.class_obj, student=pregen)
+        SessionAttendance.objects.create(session=self.session, student=pregen, status="absent")
+
+        self.client.force_authenticate(user=self.user)
+        today = timezone.localdate()
+        response = self.client.get(
+            f"/api/v1/attendance/matrix/?class_id={self.class_obj.id}&month={today.month}&year={today.year}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        records_by_student = {
+            row["id"]: row["records"][str(self.session.id)] for row in response.data["students"]
+        }
+        self.assertEqual(records_by_student[self.student.id], "present")
+        self.assertEqual(records_by_student[pregen.id], "absent")
+        self.assertIsNone(records_by_student[unmarked.id])
+
     def test_matrix_endpoint_missing_class_id(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.get("/api/v1/attendance/matrix/")
@@ -352,6 +374,19 @@ class SessionFilterTests(APITestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["id"], self.session1.id)
 
+    def test_session_list_uses_slim_slot(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/v1/sessions/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = response.data["results"][0]
+        self.assertIn("class_obj", row)
+        self.assertIn("teacher", row)
+        slot = row["timetable_slot"]
+        self.assertNotIn("teacher", slot)
+        self.assertNotIn("class_obj", slot)
+        self.assertIn("subject", slot)
+        self.assertIn("id", slot)
+
 
 class CheckInCorrectionTests(APITestCase):
     """Staff can delete a campus check-in to undo a mis-tap."""
@@ -407,6 +442,16 @@ class CheckInCorrectionTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["deleted_count"], 2)
+
+    def test_checkin_list_uses_slim_student(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get("/api/v1/check-ins/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data.get("results", response.data)
+        student = results[0]["student"]
+        self.assertEqual(student["name"], self.student.name)
+        self.assertNotIn("class_labels", student)
+        self.assertNotIn("class_ids", student)
 
     def test_delete_reverts_auto_marked_attendance_only(self):
         from timetable.models import Class, TimetableSlot
