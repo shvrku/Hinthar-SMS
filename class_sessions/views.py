@@ -9,10 +9,9 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
-from django.db import transaction, connection
+from django.db import transaction
 from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
-from django.core.cache import cache
 from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
 from class_sessions.serializers import (
     SessionSerializer, SessionListSerializer, SessionAttendanceSerializer,
@@ -22,10 +21,19 @@ from class_sessions.serializers import (
 from class_sessions.datetime_bounds import aware_day_range, month_day_range, parse_iso_date
 from class_sessions.utils import process_checkin_attendance
 from people.permissions import IsStaffOrAbove, CanCheckIn
-from people.models import Student, User, Teacher, Staff, Subject
+from people.models import Student
 from people.views import BulkOperationsMixin
+from people.audit import (
+    CATEGORY_CHECK_IN,
+    CATEGORY_SESSION,
+    AuditActorMixin,
+    log_event,
+    log_sessions_generated,
+    mute_audit,
+)
 from timetable.models import TimetableSlot, ClassStudent, Class
 from timetable.utils import generate_sessions_for_slots, get_month_end
+from class_sessions.overview_stats import build_overview_stats
 
 MATRIX_SESSION_CAP = 400
 
@@ -41,7 +49,7 @@ def revert_checkin_auto_attendance(checkin_ids):
     return regular_count, adhoc_count
 
 
-class SessionViewSet(BulkOperationsMixin, ModelViewSet):
+class SessionViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
     # PERF-H1: do not prefetch attendances on list — serializer does not embed them;
     # matrix/detail endpoints load attendances explicitly when needed.
     queryset = Session.objects.select_related(
@@ -123,8 +131,20 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             )
         
         qs = self.get_queryset().filter(pk__in=ids)
+        count = qs.count()
         with transaction.atomic():
-            deleted_count, _ = qs.delete()
+            with mute_audit():
+                deleted_count, _ = qs.delete()
+        if count:
+            log_event(
+                user=request.user,
+                category=CATEGORY_SESSION,
+                action='delete',
+                summary=f"Deleted {count} session{'s' if count != 1 else ''}",
+                model_name='Session',
+                record_id='',
+                new_value=str(count),
+            )
         return Response(
             {'deleted_count': deleted_count, 'deleted_ids': ids},
             status=status.HTTP_200_OK
@@ -447,6 +467,7 @@ class GenerateClassSessionsView(APIView):
         created_sessions, existing_sessions = generate_sessions_for_slots(
             slots, start_date=start_date, end_date=end_date
         )
+        log_sessions_generated(request.user, len(created_sessions), str(class_obj))
 
         def _session_summary(session):
             return {
@@ -728,6 +749,7 @@ class AdHocAttendanceMatrixView(APIView):
 
 
 class CheckInViewSet(
+    AuditActorMixin,
     BulkOperationsMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -788,9 +810,20 @@ class CheckInViewSet(
     )
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
+        name = instance.student.name
+        day = instance.date
+        pk = instance.pk
         with transaction.atomic():
             revert_checkin_auto_attendance([instance.id])
             instance.delete()
+        log_event(
+            user=request.user,
+            category=CATEGORY_CHECK_IN,
+            action='delete',
+            summary=f"Removed check-in for {name} on {day:%d/%m/%y}",
+            model_name='CheckIn',
+            record_id=pk,
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['delete'])
@@ -808,6 +841,16 @@ class CheckInViewSet(
             regular_count, adhoc_count = revert_checkin_auto_attendance(actual_ids)
             deleted_count = qs.count()
             qs.delete()
+        if deleted_count:
+            log_event(
+                user=request.user,
+                category=CATEGORY_CHECK_IN,
+                action='delete',
+                summary=f"Removed {deleted_count} check-in{'s' if deleted_count != 1 else ''}",
+                model_name='CheckIn',
+                record_id='',
+                new_value=str(deleted_count),
+            )
         return Response({
             'deleted_count': deleted_count,
             'deleted_ids': actual_ids,
@@ -1169,6 +1212,14 @@ class QRCheckInView(APIView):
             )
             process_checkin_attendance(checkin)
 
+        log_event(
+            user=request.user,
+            category=CATEGORY_CHECK_IN,
+            action='create',
+            summary=f"Checked in {student.name} (QR)",
+            model_name='CheckIn',
+            record_id=checkin.pk,
+        )
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -1307,12 +1358,13 @@ class CheckInLookupView(APIView):
 
 class StatsView(APIView):
     permission_classes = [IsStaffOrAbove]
-    STATS_CACHE_KEY = 'stats_counts'
-    STATS_CACHE_TTL = 300  # 5 minutes
 
     @extend_schema(
         summary="System statistics",
-        description="Returns record counts for all tables in the system. Staff and admin only.",
+        description=(
+            "Record counts plus 30-day KPI trends, a 12-month cumulative student "
+            "enrollment series, and the latest audit events. Staff and admin only."
+        ),
         responses={
             200: {
                 'type': 'object',
@@ -1328,41 +1380,15 @@ class StatsView(APIView):
                     'sessions': {'type': 'integer'},
                     'session_attendances': {'type': 'integer'},
                     'check_ins': {'type': 'integer'},
+                    'trends': {'type': 'object'},
+                    'student_series': {'type': 'array'},
+                    'recent_activity': {'type': 'array'},
                 },
             },
         },
     )
     def get(self, request):
-        data = cache.get(self.STATS_CACHE_KEY)
-        if data is not None:
-            return Response(data)
-
-        # PERF-M2: one round-trip of scalar subselects instead of N sequential COUNT(*)
-        models = {
-            'users': User,
-            'students': Student,
-            'teachers': Teacher,
-            'staff': Staff,
-            'subjects': Subject,
-            'classes': Class,
-            'class_students': ClassStudent,
-            'timetable_slots': TimetableSlot,
-            'sessions': Session,
-            'session_attendances': SessionAttendance,
-            'check_ins': CheckIn,
-        }
-        select_parts = []
-        keys = []
-        for key, model in models.items():
-            table = connection.ops.quote_name(model._meta.db_table)
-            select_parts.append(f'(SELECT COUNT(*) FROM {table})')
-            keys.append(key)
-        with connection.cursor() as cursor:
-            cursor.execute('SELECT ' + ', '.join(select_parts))
-            row = cursor.fetchone()
-        data = {key: int(row[i] or 0) for i, key in enumerate(keys)}
-        cache.set(self.STATS_CACHE_KEY, data, self.STATS_CACHE_TTL)
-        return Response(data)
+        return Response(build_overview_stats())
 
 
 class ManualCheckInView(APIView):
@@ -1443,11 +1469,19 @@ class ManualCheckInView(APIView):
             )
             process_checkin_attendance(checkin)
 
+        log_event(
+            user=request.user,
+            category=CATEGORY_CHECK_IN,
+            action='create',
+            summary=f"Checked in {student.name} (manual)",
+            model_name='CheckIn',
+            record_id=checkin.pk,
+        )
         serializer = CheckInSerializer(checkin)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
+class AdHocSessionViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
     queryset = AdHocSession.objects.select_related(
         'teacher__user', 'actual_teacher__user', 'subject'
     ).order_by('id')
@@ -1494,8 +1528,20 @@ class AdHocSessionViewSet(BulkOperationsMixin, ModelViewSet):
             )
         
         qs = self.get_queryset().filter(pk__in=ids)
+        count = qs.count()
         with transaction.atomic():
-            deleted_count, _ = qs.delete()
+            with mute_audit():
+                deleted_count, _ = qs.delete()
+        if count:
+            log_event(
+                user=request.user,
+                category=CATEGORY_SESSION,
+                action='delete',
+                summary=f"Deleted {count} ad-hoc session{'s' if count != 1 else ''}",
+                model_name='AdHocSession',
+                record_id='',
+                new_value=str(count),
+            )
         return Response(
             {'deleted_count': deleted_count, 'deleted_ids': ids},
             status=status.HTTP_200_OK

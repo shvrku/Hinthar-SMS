@@ -1,17 +1,15 @@
 # Scaling Standards — Implementation Plan
 
-Canonical status and full task tables live in the Dashboard copy — **edit that file first**:
+Canonical write-up: **`Hinthar-Dashboard/docs/SCALING_IMPLEMENTATION_PLAN.md`**.
 
-`Hinthar-Dashboard/docs/SCALING_IMPLEMENTATION_PLAN.md`
-
-This SMS copy is a short pointer so backend contributors see the same phase language.
+This SMS copy is a pointer so backend contributors see the same phase language.
 
 Cross-repo plan aligns **Hinthar-SMS** and **Hinthar-Dashboard** with:
 
 - `docs/API_STANDARDS.md` (this repo)
 - `Hinthar-Dashboard/docs/FRONTEND_STANDARDS.md`
 
-**Last status update:** 2026-08-07 (Phase 8 Find sessions filters + ISO DateTime + Phase 7 hubs).
+**Last status update:** 2026-08-17 — **this plan is complete** (phases 0–9).
 
 ---
 
@@ -22,15 +20,19 @@ Cross-repo plan aligns **Hinthar-SMS** and **Hinthar-Dashboard** with:
 | 0–6 | Docs, roles, payroll scrap, pagination, matrix, API hygiene, check-in/QR | **Done** |
 | 7 | Entity detail hubs + analytics + teacher cover (`actual_teacher`) | **Done** |
 | 8 | Find sessions API filters + ISO Session DateTimes | **Done** |
+| 9 | Matrix `null` vs absent, datetime bounds, audit `category`/`summary`, `GET /stats/` overview | **Done** |
 
-### Backend leftovers that matter
+### Shipped (SMS)
 
-- Teacher (and student) **scoped** querysets before teacher portal.
-- Regenerate Spectacular export when env allows (`python manage.py spectacular --file docs/openapi-schema.yml`).
-- Optional global DRF exception handler.
-- Future: teacher check-in writing `actual_teacher` (staff assign substitute via Sessions / Find sessions today).
+**Phase 9**
 
-### Shipped recently (SMS)
+- Attendance matrix: missing cells are `null` (unmarked), not filled as `'absent'`.
+- `people.AuditLog.category` + `summary`; `people.audit.log_event()`; generate-sessions muted to one summary.
+- `GET /audit-logs/` is `IsStaffOrAbove`.
+- `GET /stats/` adds `trends`, `student_series`, `recent_activity` (`class_sessions/overview_stats.py`). Migration: `people/0014_auditlog_category_summary`.
+- Session list date filters via `class_sessions.datetime_bounds`.
+- `GET /me/student/`, `GET /me/attendance-summary/`; student `link_user` / `unlink_user`.
+- Check-in throttle `120/minute`.
 
 **Phase 8**
 
@@ -48,12 +50,6 @@ Cross-repo plan aligns **Hinthar-SMS** and **Hinthar-Dashboard** with:
 
 - Student attendance-summary, check-in overview, QR activate/deactivate, pagination, matrix `class_id` 400.
 
----
+### Not part of this plan
 
-## Moving forward
-
-```text
-1  Optional: regenerate OpenAPI schema file + global exception handler
-2  Teacher-scoped querysets (if teacher login imminent)
-3  Teacher check-in → actual_teacher (when product asks)
-```
+Teacher portal / scoped querysets, a dedicated audit-logs UI (home already previews events), a global exception handler, and academic records are **new product work** — not incomplete scaling phases. Live OpenAPI: `/api/v1/docs/`.

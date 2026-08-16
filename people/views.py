@@ -13,6 +13,13 @@ from people.serializers import (
     UserSerializer, AdminUserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
 from people.models import Subject, Teacher, Student, Staff, AuditLog
+from people.audit import (
+    CATEGORY_STUDENT,
+    CATEGORY_USER,
+    AuditActorMixin,
+    AuditedViewSetMixin,
+    log_event,
+)
 from people.permissions import IsAdmin, IsStaffOrAbove, IsStudentOwnerOrStaffOrAdmin
 from people.roles import ROLE_RANK
 from people.student_analytics import VALID_RANGES, build_student_attendance_summary
@@ -189,11 +196,15 @@ class SubjectViewSet(BulkOperationsMixin, ModelViewSet):
     pagination_class = None  # small catalog — used as dropdown options
 
 
-class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
+class TeacherViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = Teacher.objects.select_related('user').order_by('id')
     serializer_class = TeacherSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    audit_category = 'teacher'
+    audit_noun = 'teacher'
+    audit_noun_plural = 'teachers'
+    audit_label_attr = 'name'
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -251,11 +262,15 @@ class TeacherViewSet(BulkOperationsMixin, ModelViewSet):
         return Response(build_teacher_attendance_summary(teacher, range_key))
 
 
-class StudentViewSet(BulkOperationsMixin, ModelViewSet):
+class StudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = Student.objects.select_related('user').order_by('id')
     serializer_class = StudentSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    audit_category = 'student'
+    audit_noun = 'student'
+    audit_noun_plural = 'students'
+    audit_label_attr = 'name'
 
     # SEC-H2: only detail retrieve + dedicated token actions may include the secret
     _TOKEN_ACTIONS = frozenset({
@@ -327,6 +342,15 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         """Regenerate a student's check-in token. Staff or admin only."""
         student = self.get_object()
         student.regenerate_check_in_token()
+        log_event(
+            user=request.user,
+            category=CATEGORY_STUDENT,
+            action='update',
+            summary=f"Regenerated check-in QR for {student.name}",
+            model_name='Student',
+            record_id=student.pk,
+            field_name='check_in_token',
+        )
         return Response({
             'check_in_token': student.check_in_token,
             'check_in_token_active': student.check_in_token_active,
@@ -343,6 +367,17 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         if not student.check_in_token_active:
             student.check_in_token_active = True
             student.save(update_fields=['check_in_token_active'])
+            log_event(
+                user=request.user,
+                category=CATEGORY_STUDENT,
+                action='update',
+                summary=f"Activated check-in QR for {student.name}",
+                model_name='Student',
+                record_id=student.pk,
+                field_name='check_in_token_active',
+                old_value=False,
+                new_value=True,
+            )
         return Response({'check_in_token_active': True})
 
     @extend_schema(
@@ -356,6 +391,17 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         if student.check_in_token_active:
             student.check_in_token_active = False
             student.save(update_fields=['check_in_token_active'])
+            log_event(
+                user=request.user,
+                category=CATEGORY_STUDENT,
+                action='update',
+                summary=f"Deactivated check-in QR for {student.name}",
+                model_name='Student',
+                record_id=student.pk,
+                field_name='check_in_token_active',
+                old_value=True,
+                new_value=False,
+            )
         return Response({'check_in_token_active': False})
 
     @extend_schema(
@@ -487,14 +533,18 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         return Response(serializer.data)
 
 
-class StaffViewSet(BulkOperationsMixin, ModelViewSet):
+class StaffViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = Staff.objects.select_related('user').order_by('id')
     serializer_class = StaffSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    audit_category = 'staff'
+    audit_noun = 'staff member'
+    audit_noun_plural = 'staff members'
+    audit_label_attr = 'name'
 
 
-class UserViewSet(BulkOperationsMixin, ModelViewSet):
+class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
     """
     Account / role administration. Admin only.
     Staff operate the school but cannot elevate privileges.
@@ -568,9 +618,47 @@ class UserViewSet(BulkOperationsMixin, ModelViewSet):
             return error
         return super().update(request, *args, **kwargs)
 
+    def perform_update(self, serializer):
+        old_role = serializer.instance.role
+        old_active = serializer.instance.is_active
+        instance = serializer.save()
+        label = instance.email or instance.username
+        if instance.role != old_role:
+            log_event(
+                user=self.request.user,
+                category=CATEGORY_USER,
+                action='update',
+                summary=f"Changed role of {label} from {old_role} to {instance.role}",
+                model_name='User',
+                record_id=instance.pk,
+                field_name='role',
+                old_value=old_role,
+                new_value=instance.role,
+            )
+        elif instance.is_active != old_active:
+            state = 'Activated' if instance.is_active else 'Deactivated'
+            log_event(
+                user=self.request.user,
+                category=CATEGORY_USER,
+                action='update',
+                summary=f"{state} account {label}",
+                model_name='User',
+                record_id=instance.pk,
+                field_name='is_active',
+                old_value=old_active,
+                new_value=instance.is_active,
+            )
+
 
 class AuditLogViewSet(ReadOnlyModelViewSet):
     queryset = AuditLog.objects.select_related('user').order_by('-timestamp')
     serializer_class = AuditLogSerializer
-    permission_classes = [IsAdmin]
+    permission_classes = [IsStaffOrAbove]
     ordering = ['-timestamp']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        category = (self.request.query_params.get('category') or '').strip()
+        if category:
+            qs = qs.filter(category=category)
+        return qs

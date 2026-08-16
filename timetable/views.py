@@ -10,6 +10,7 @@ from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, ClassStudentListSerializer, TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
+from people.audit import AuditedViewSetMixin, log_sessions_generated
 from people.permissions import IsStaffOrAbove
 from people.views import BulkOperationsMixin
 from people.student_analytics import VALID_RANGES
@@ -18,12 +19,15 @@ from rest_framework import status
 from rest_framework.decorators import action
 
 
-class ClassViewSet(BulkOperationsMixin, ModelViewSet):
+class ClassViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = Class.objects.order_by('id')
     serializer_class = ClassSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
     pagination_class = None  # small catalog — used as dropdown options
+    audit_category = 'class'
+    audit_noun = 'class'
+    audit_noun_plural = 'classes'
 
     @extend_schema(
         parameters=[
@@ -77,11 +81,23 @@ class ClassViewSet(BulkOperationsMixin, ModelViewSet):
         ],
     ),
 )
-class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
+class ClassStudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = ClassStudent.objects.select_related('class_obj', 'student__user').order_by('id')
     serializer_class = ClassStudentSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+    audit_category = 'class'
+    audit_noun = 'enrollment'
+    audit_noun_plural = 'enrollments'
+
+    def audit_summary(self, action, instance):
+        student = getattr(getattr(instance, 'student', None), 'name', None) or instance.student_id
+        klass = instance.class_obj
+        if action == 'create':
+            return f"Enrolled {student} in {klass}"
+        if action == 'delete':
+            return f"Removed {student} from {klass}"
+        return f"Updated enrollment of {student} in {klass}"
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -212,6 +228,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
         response.data['sessions_generated'] = self._build_generation_summary(created, existed)
+        log_sessions_generated(request.user, len(created), f"timetable slot on {slot.class_obj}")
         return response
 
     @extend_schema(
@@ -229,6 +246,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
         response.data['sessions_generated'] = self._build_generation_summary(created, existed)
+        log_sessions_generated(request.user, len(created), f"timetable slot on {slot.class_obj}")
         return response
 
     @extend_schema(
@@ -246,6 +264,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
         response.data['sessions_generated'] = self._build_generation_summary(created, existed)
+        log_sessions_generated(request.user, len(created), f"timetable slot on {slot.class_obj}")
         return response
 
 

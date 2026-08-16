@@ -158,7 +158,20 @@ class AuditLogSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = AuditLog
-        fields = ['id', 'user', 'user_email', 'model_name', 'record_id', 'action', 'field_name', 'old_value', 'new_value', 'timestamp']
+        fields = [
+            'id',
+            'user',
+            'user_email',
+            'category',
+            'summary',
+            'model_name',
+            'record_id',
+            'action',
+            'field_name',
+            'old_value',
+            'new_value',
+            'timestamp',
+        ]
         read_only_fields = fields
 
     @extend_schema_field(serializers.CharField(allow_null=True))
