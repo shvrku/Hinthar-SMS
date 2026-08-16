@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -63,6 +63,28 @@ class ClassAttendanceSummaryTests(APITestCase):
         self.assertIn("lesson", res.data)
         self.assertEqual(res.data["lesson"]["present"], 1)
         self.assertEqual(res.data["campus"]["enrolled_students"], 1)
+
+    def test_all_range_keeps_full_daily_campus_series(self):
+        self.client.force_authenticate(user=self.admin)
+        today = timezone.localdate()
+        past = today - timedelta(days=5)
+        Session.objects.create(
+            timetable_slot=self.slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(past, time(9, 0))),
+            end_time=timezone.make_aware(datetime.combine(past, time(10, 0))),
+            status="completed",
+        )
+        res = self.client.get(
+            f"/api/v1/classes/{self.class_obj.id}/attendance-summary/?range=all"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        expected_days = (today - past).days + 1
+        self.assertEqual(res.data["campus"]["days_in_range"], expected_days)
+        self.assertEqual(len(res.data["campus"]["daily"]), expected_days)
+        self.assertEqual(res.data["campus"]["daily"][0]["date"], past.isoformat())
+        self.assertEqual(res.data["campus"]["daily"][-1]["date"], today.isoformat())
 
 
 class TeacherAttendanceSummaryTests(APITestCase):
@@ -171,3 +193,8 @@ class TimetableSlotClassFilterTests(APITestCase):
         rows = res.data if isinstance(res.data, list) else res.data.get("results", [])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], self.slot_a.id)
+
+    def test_list_requires_class_id(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get("/api/v1/timetable-slots/")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)

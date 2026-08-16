@@ -178,8 +178,31 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
 
         email, username = self._identity_from_claims(payload, clerk_id)
 
-        # 6. JIT provision the User with DEFAULT_ROLE
-        #    Role is NEVER overwritten from Clerk — admins manage it via Django /users.
+        user, created = self._get_or_provision_user(clerk_id, email=email, username=username)
+
+        if not created:
+            self._sync_identity(user, email=email, username=username)
+
+        self._reject_if_inactive(user)
+        return (user, token)
+
+    def _get_or_provision_user(self, clerk_id, *, email: str, username: str):
+        """Load the local user with profiles; only get_or_create on a miss."""
+        qs = User.objects.select_related(
+            'teacher_profile', 'student_profile', 'staff_profile'
+        )
+        cache_key = f'clerk_user_pk:{clerk_id}'
+        pk = cache.get(cache_key)
+        if pk:
+            user = qs.filter(pk=pk, clerk_id=clerk_id).first()
+            if user:
+                return user, False
+
+        user = qs.filter(clerk_id=clerk_id).first()
+        if user:
+            cache.set(cache_key, user.pk, 60)
+            return user, False
+
         user, created = User.objects.get_or_create(
             clerk_id=clerk_id,
             defaults={
@@ -188,15 +211,12 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
                 'role': DEFAULT_ROLE,
                 'is_staff': False,
                 'is_superuser': False,
-            }
+            },
         )
-
-        # 7. Sync identity fields only (never role) when Clerk claims improve
         if not created:
-            self._sync_identity(user, email=email, username=username)
-
-        self._reject_if_inactive(user)
-        return (user, token)
+            user = qs.get(pk=user.pk)
+        cache.set(cache_key, user.pk, 60)
+        return user, created
 
     @staticmethod
     def _identity_from_claims(payload, clerk_id: str) -> tuple[str, str]:

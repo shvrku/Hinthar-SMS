@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import Q
 from timetable.models import Class, ClassStudent, TimetableSlot
 from timetable.serializers import (
-    ClassSerializer, ClassStudentSerializer, TimetableSlotSerializer
+    ClassSerializer, ClassStudentSerializer, ClassStudentListSerializer, TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
 from people.permissions import IsStaffOrAbove
@@ -83,6 +83,11 @@ class ClassStudentViewSet(BulkOperationsMixin, ModelViewSet):
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
 
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ClassStudentListSerializer
+        return ClassStudentSerializer
+
     def get_queryset(self):
         qs = super().get_queryset()
         class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
@@ -99,7 +104,16 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
     serializer_class = TimetableSlotSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
-    pagination_class = None  # scoped by class in practice; keep full for timetable editors
+    pagination_class = None  # scoped by class; list requires class_id
+
+    def list(self, request, *args, **kwargs):
+        class_id = request.query_params.get('class_id') or request.query_params.get('class_obj_id')
+        if not class_id:
+            return Response(
+                {'error': 'class_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
         qs = super().get_queryset()

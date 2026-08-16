@@ -15,16 +15,19 @@ from django.utils import timezone
 from django.core.cache import cache
 from class_sessions.models import Session, SessionAttendance, CheckIn, AdHocSession, AdHocSessionAttendance
 from class_sessions.serializers import (
-    SessionSerializer, SessionAttendanceSerializer,
-    SessionAttendanceListSerializer, CheckInSerializer,
+    SessionSerializer, SessionListSerializer, SessionAttendanceSerializer,
+    SessionAttendanceListSerializer, CheckInSerializer, CheckInListSerializer,
     AdHocSessionSerializer, AdHocSessionAttendanceSerializer
 )
+from class_sessions.datetime_bounds import aware_day_range, month_day_range, parse_iso_date
 from class_sessions.utils import process_checkin_attendance
 from people.permissions import IsStaffOrAbove, CanCheckIn
 from people.models import Student, User, Teacher, Staff, Subject
 from people.views import BulkOperationsMixin
 from timetable.models import TimetableSlot, ClassStudent, Class
 from timetable.utils import generate_sessions_for_slots, get_month_end
+
+MATRIX_SESSION_CAP = 400
 
 
 def revert_checkin_auto_attendance(checkin_ids):
@@ -42,21 +45,29 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
     # PERF-H1: do not prefetch attendances on list — serializer does not embed them;
     # matrix/detail endpoints load attendances explicitly when needed.
     queryset = Session.objects.select_related(
-        'teacher__user', 'actual_teacher__user', 'class_obj',
-        'timetable_slot__class_obj', 'timetable_slot__subject',
-        'timetable_slot__teacher__user',
+        'teacher', 'actual_teacher', 'class_obj',
+        'timetable_slot__subject',
     ).order_by('id')
     serializer_class = SessionSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return SessionListSerializer
+        return SessionSerializer
     
     def get_queryset(self):
         qs = super().get_queryset()
         teacher_id = self.request.query_params.get('teacher_id')
         class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
         subject_id = self.request.query_params.get('subject_id')
-        date_from = self.request.query_params.get('date_from') or self.request.query_params.get('start_date')
-        date_to = self.request.query_params.get('date_to') or self.request.query_params.get('end_date')
+        date_from = parse_iso_date(
+            self.request.query_params.get('date_from') or self.request.query_params.get('start_date')
+        )
+        date_to = parse_iso_date(
+            self.request.query_params.get('date_to') or self.request.query_params.get('end_date')
+        )
         month_param = self.request.query_params.get('month')
         year_param = self.request.query_params.get('year')
         status_param = self.request.query_params.get('status')
@@ -71,13 +82,21 @@ class SessionViewSet(BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(timetable_slot_id=timetable_slot_id)
         if subject_id:
             qs = qs.filter(timetable_slot__subject_id=subject_id)
-        if date_from:
-            qs = qs.filter(start_time__date__gte=date_from)
-        if date_to:
-            qs = qs.filter(start_time__date__lte=date_to)
-        if month_param:
+        if date_from or date_to:
+            window_from = date_from or date_to
+            window_to = date_to or date_from
+            start_dt, end_dt = aware_day_range(window_from, window_to)
+            qs = qs.filter(start_time__gte=start_dt, start_time__lt=end_dt)
+        if month_param and year_param:
+            try:
+                month_from, month_to = month_day_range(int(year_param), int(month_param))
+                start_dt, end_dt = aware_day_range(month_from, month_to)
+                qs = qs.filter(start_time__gte=start_dt, start_time__lt=end_dt)
+            except (TypeError, ValueError):
+                pass
+        elif month_param:
             qs = qs.filter(start_time__month=month_param)
-        if year_param:
+        elif year_param:
             qs = qs.filter(start_time__year=year_param)
         if status_param:
             qs = qs.filter(status=status_param)
@@ -187,9 +206,15 @@ class SessionAttendanceViewSet(BulkOperationsMixin, ModelViewSet):
         if class_id:
             qs = qs.filter(session__class_obj_id=class_id)
         if date_from:
-            qs = qs.filter(session__start_time__date__gte=date_from)
+            parsed = parse_iso_date(date_from)
+            if parsed:
+                start_dt, _ = aware_day_range(parsed, parsed)
+                qs = qs.filter(session__start_time__gte=start_dt)
         if date_to:
-            qs = qs.filter(session__start_time__date__lte=date_to)
+            parsed = parse_iso_date(date_to)
+            if parsed:
+                _, end_dt = aware_day_range(parsed, parsed)
+                qs = qs.filter(session__start_time__lt=end_dt)
 
         return qs
     
@@ -504,7 +529,7 @@ class AttendanceMatrixView(APIView):
         sessions_qs = Session.objects.filter(
             class_obj_id=class_id_int
         ).select_related(
-            'timetable_slot__subject', 'teacher__user', 'class_obj'
+            'timetable_slot__subject', 'teacher', 'class_obj'
         ).order_by('start_time')
 
         if subject_id_raw and subject_id_raw != 'all':
@@ -519,20 +544,26 @@ class AttendanceMatrixView(APIView):
             except ValueError:
                 return Response({'error': 'teacher_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if date_from_raw:
-            sessions_qs = sessions_qs.filter(start_time__date__gte=date_from_raw)
-        if date_to_raw:
-            sessions_qs = sessions_qs.filter(start_time__date__lte=date_to_raw)
-
-        if not date_from_raw and not date_to_raw:
+        date_from = parse_iso_date(date_from_raw)
+        date_to = parse_iso_date(date_to_raw)
+        if date_from or date_to:
+            window_from = date_from or date_to
+            window_to = date_to or date_from
+            start_dt, end_dt = aware_day_range(window_from, window_to)
+            sessions_qs = sessions_qs.filter(start_time__gte=start_dt, start_time__lt=end_dt)
+        else:
             try:
                 m = int(month_raw) if month_raw else now.month
                 y = int(year_raw) if year_raw else now.year
-                sessions_qs = sessions_qs.filter(start_time__year=y, start_time__month=m)
+                month_from, month_to = month_day_range(y, m)
+                start_dt, end_dt = aware_day_range(month_from, month_to)
+                sessions_qs = sessions_qs.filter(start_time__gte=start_dt, start_time__lt=end_dt)
             except ValueError:
                 pass
 
-        sessions = list(sessions_qs)
+        capped = list(sessions_qs[:MATRIX_SESSION_CAP + 1])
+        truncated = len(capped) > MATRIX_SESSION_CAP
+        sessions = capped[:MATRIX_SESSION_CAP]
         session_ids = [s.id for s in sessions]
 
         # Enrolled students for this class ONLY
@@ -542,11 +573,12 @@ class AttendanceMatrixView(APIView):
         students = [cs.student for cs in class_students]
         student_ids = [st.id for st in students]
 
-        # Batch query attendance records
-        attendances = SessionAttendance.objects.filter(
-            session_id__in=session_ids,
-            student_id__in=student_ids
-        ).values('id', 'session_id', 'student_id', 'status')
+        attendances = list(
+            SessionAttendance.objects.filter(
+                session_id__in=session_ids,
+                student_id__in=student_ids
+            ).values('id', 'session_id', 'student_id', 'status')
+        )
 
         att_map = {(a['student_id'], a['session_id']): a['status'] for a in attendances}
 
@@ -554,7 +586,7 @@ class AttendanceMatrixView(APIView):
         for st in students:
             records = {}
             for sid in session_ids:
-                records[str(sid)] = att_map.get((st.id, sid), 'absent')
+                records[str(sid)] = att_map.get((st.id, sid))
             student_list.append({
                 'id': st.id,
                 'name': st.name,
@@ -583,7 +615,8 @@ class AttendanceMatrixView(APIView):
             'class_id': class_id_int,
             'sessions': session_list,
             'students': student_list,
-            'attendances': list(attendances),
+            'attendances': attendances,
+            'truncated': truncated,
         }, status=status.HTTP_200_OK)
 
 
@@ -615,7 +648,7 @@ class AdHocAttendanceMatrixView(APIView):
         year_raw = request.query_params.get('year')
 
         now = timezone.localdate()
-        sessions_qs = AdHocSession.objects.select_related('subject', 'teacher__user').order_by('date', 'start_time')
+        sessions_qs = AdHocSession.objects.select_related('subject', 'teacher').order_by('date', 'start_time')
 
         if subject_id_raw and subject_id_raw != 'all':
             try:
@@ -629,26 +662,31 @@ class AdHocAttendanceMatrixView(APIView):
             except ValueError:
                 pass
 
-        if date_from_raw:
-            sessions_qs = sessions_qs.filter(date__gte=date_from_raw)
-        if date_to_raw:
-            sessions_qs = sessions_qs.filter(date__lte=date_to_raw)
-
-        if not date_from_raw and not date_to_raw:
+        date_from = parse_iso_date(date_from_raw)
+        date_to = parse_iso_date(date_to_raw)
+        if date_from or date_to:
+            window_from = date_from or date_to
+            window_to = date_to or date_from
+            sessions_qs = sessions_qs.filter(date__gte=window_from, date__lte=window_to)
+        else:
             try:
                 m = int(month_raw) if month_raw else now.month
                 y = int(year_raw) if year_raw else now.year
-                sessions_qs = sessions_qs.filter(date__year=y, date__month=m)
+                month_from, month_to = month_day_range(y, m)
+                sessions_qs = sessions_qs.filter(date__gte=month_from, date__lte=month_to)
             except ValueError:
                 pass
 
-        sessions = list(sessions_qs)
+        capped = list(sessions_qs[:MATRIX_SESSION_CAP + 1])
+        truncated = len(capped) > MATRIX_SESSION_CAP
+        sessions = capped[:MATRIX_SESSION_CAP]
         session_ids = [s.id for s in sessions]
 
-        # Batch query attendance records
-        attendances = AdHocSessionAttendance.objects.filter(
-            ad_hoc_session_id__in=session_ids
-        ).values('id', 'ad_hoc_session_id', 'student_id', 'status')
+        attendances = list(
+            AdHocSessionAttendance.objects.filter(
+                ad_hoc_session_id__in=session_ids
+            ).values('id', 'ad_hoc_session_id', 'student_id', 'status')
+        )
 
         student_ids_in_att = set(a['student_id'] for a in attendances)
         if student_ids_in_att:
@@ -684,7 +722,8 @@ class AdHocAttendanceMatrixView(APIView):
         return Response({
             'sessions': session_list,
             'students': student_list,
-            'attendances': list(attendances),
+            'attendances': attendances,
+            'truncated': truncated,
         }, status=status.HTTP_200_OK)
 
 
@@ -706,6 +745,11 @@ class CheckInViewSet(
     serializer_class = CheckInSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['-timestamp']
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return CheckInListSerializer
+        return CheckInSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()

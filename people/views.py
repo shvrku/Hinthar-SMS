@@ -95,7 +95,12 @@ class MeView(APIView):
         description="Retrieve profile details for the currently logged in user based on Clerk access token validation."
     )
     def get(self, request):
-        serializer = UserSerializer(request.user)
+        user = (
+            User.objects
+            .select_related('teacher_profile', 'student_profile', 'staff_profile')
+            .get(pk=request.user.pk)
+        )
+        serializer = UserSerializer(user)
         return Response(serializer.data)
 
 
@@ -519,6 +524,14 @@ class UserViewSet(BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(student_profile__isnull=False)
         elif linked is False:
             qs = qs.filter(student_profile__isnull=True)
+
+        linkable = (self.request.query_params.get('linkable') or '').strip().lower()
+        if linkable in ('true', '1', 'yes'):
+            qs = qs.filter(
+                role__in=LINKABLE_USER_ROLES,
+                teacher_profile__isnull=True,
+                staff_profile__isnull=True,
+            )
 
         return qs
 

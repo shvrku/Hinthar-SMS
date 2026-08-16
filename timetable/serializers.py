@@ -8,6 +8,14 @@ class ClassSerializer(serializers.ModelSerializer):
         model = Class
         fields = ['id', 'education_level', 'cohort_identifier', 'cohort_sub_category']
 
+class ClassStudentListStudentSerializer(serializers.ModelSerializer):
+    user_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Student
+        fields = ['id', 'name', 'unique_code', 'user_id']
+
+
 class ClassStudentSerializer(serializers.ModelSerializer):
     class_obj = ClassSerializer(read_only=True)
     student = StudentSerializer(read_only=True)
@@ -21,6 +29,17 @@ class ClassStudentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassStudent
         fields = ['id', 'class_obj', 'student', 'class_obj_id', 'student_id']
+
+
+class ClassStudentListSerializer(serializers.ModelSerializer):
+    """List payload without StudentSerializer class_labels / class_ids (N+1)."""
+    class_obj = ClassSerializer(read_only=True)
+    student = ClassStudentListStudentSerializer(read_only=True)
+
+    class Meta:
+        model = ClassStudent
+        fields = ['id', 'class_obj', 'student', 'class_obj_id', 'student_id']
+        read_only_fields = fields
 
 class TimetableSlotSerializer(serializers.ModelSerializer):
     class_obj = ClassSerializer(read_only=True)

@@ -56,6 +56,52 @@ class SessionSerializer(serializers.ModelSerializer):
                 })
         return attrs
 
+class SessionListSlotSerializer(serializers.ModelSerializer):
+    """Slot shape for session lists — no nested class/teacher (those sit on the session)."""
+    subject = SubjectSerializer(read_only=True)
+
+    class Meta:
+        model = TimetableSlot
+        fields = ['id', 'day_of_week', 'start_time', 'end_time', 'room', 'subject']
+
+
+class SessionListSerializer(serializers.ModelSerializer):
+    """List payload: keep teacher/class for the table, drop the duplicated nested slot dump."""
+    timetable_slot = SessionListSlotSerializer(read_only=True)
+    teacher = TeacherSerializer(read_only=True)
+    actual_teacher = TeacherSerializer(read_only=True)
+    class_obj = ClassSerializer(read_only=True)
+
+    class Meta:
+        model = Session
+        fields = [
+            'id', 'timetable_slot', 'teacher', 'actual_teacher', 'class_obj',
+            'teacher_id', 'actual_teacher_id', 'class_obj_id', 'timetable_slot_id',
+            'start_time', 'end_time', 'status',
+        ]
+        read_only_fields = fields
+
+
+class CheckInStudentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Student
+        fields = ['id', 'name', 'unique_code']
+
+
+class CheckInListSerializer(serializers.ModelSerializer):
+    """List payload without StudentSerializer class_labels / class_ids (N+1)."""
+    student = CheckInStudentSerializer(read_only=True)
+    student_name = serializers.CharField(source='student.name', read_only=True)
+
+    class Meta:
+        model = CheckIn
+        fields = [
+            'id', 'student', 'student_id', 'student_name',
+            'date', 'timestamp', 'check_in_type', 'checked_by',
+        ]
+        read_only_fields = fields
+
+
 class SessionAttendanceSerializer(serializers.ModelSerializer):
     session = SessionSerializer(read_only=True)
     student = StudentSerializer(read_only=True)
