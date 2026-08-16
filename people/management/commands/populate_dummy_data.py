@@ -103,6 +103,7 @@ TEACHERS = [
 # ──────────────────────────────────────────────
 # Classes — Y6 through IAL
 # Format: (education_level, cohort_identifier, cohort_sub_category)
+# Examples: Year6 A | IG K2 (K + 2) | IG K2A (K + 2A) | IG K4 (K + 4)
 # ──────────────────────────────────────────────
 CLASSES = [
     # Year 6
@@ -113,8 +114,8 @@ CLASSES = [
     ('Year8', 'E', None), ('Year8', 'F', None),
     # Year 9
     ('Year9', 'G', None), ('Year9', 'H', None),
-    # IGCSE — 3 cohorts x 2 streams
-    ('IG', 'K', '1'), ('IG', 'K', '2'),
+    # IGCSE — K-stream with numeric and letter sub-sections
+    ('IG', 'K', '1'), ('IG', 'K', '2'), ('IG', 'K', '2A'), ('IG', 'K', '2B'), ('IG', 'K', '4'),
     ('IG', 'L', '1'), ('IG', 'L', '2'),
     ('IG', 'M', '1'), ('IG', 'M', '2'),
     # IAL — 2 cohorts x 2 streams

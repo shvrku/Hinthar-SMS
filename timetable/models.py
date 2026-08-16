@@ -24,8 +24,8 @@ class Class(models.Model):
     ]
     
     education_level = models.CharField(max_length=20, choices=EDUCATION_LEVEL_CHOICES)
-    cohort_identifier = models.CharField(max_length=1)  # single letter like E, F, G, H, K
-    cohort_sub_category = models.CharField(max_length=1, null=True, blank=True)  # stream split like 1, 2, 3
+    cohort_identifier = models.CharField(max_length=1)  # single letter, e.g. A, K, L
+    cohort_sub_category = models.CharField(max_length=10, null=True, blank=True)  # e.g. 2, 2A, 2B, 4
     
     class Meta:
         constraints = [
