@@ -38,6 +38,43 @@ from class_sessions.overview_stats import build_overview_stats
 MATRIX_SESSION_CAP = 400
 
 
+def _student_class_name(student):
+    enrollment = (
+        ClassStudent.objects
+        .select_related('class_obj')
+        .filter(student=student)
+        .first()
+    )
+    return str(enrollment.class_obj) if enrollment and enrollment.class_obj else None
+
+
+def _deactivated_check_in_payload(student, method='qr'):
+    """Safe terminal payload when campus check-in is soft-disabled."""
+    return {
+        'error': 'Check-in token is deactivated',
+        'student': {
+            'id': student.id,
+            'name': student.name,
+            'unique_code': student.unique_code,
+            'class_name': _student_class_name(student),
+            'checked_in_today': CheckIn.objects.filter(
+                student=student, date=timezone.localdate()
+            ).exists(),
+            'method': method,
+            'check_in_token_active': False,
+        },
+    }
+
+
+def _reject_if_check_in_deactivated(student, method='qr'):
+    if student.check_in_token_active:
+        return None
+    return Response(
+        _deactivated_check_in_payload(student, method=method),
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
 def revert_checkin_auto_attendance(checkin_ids):
     """Revert only roll statuses still attributed to the deleted check-ins."""
     regular_count = SessionAttendance.objects.filter(
@@ -1185,7 +1222,7 @@ class QRCheckInView(APIView):
         },
     )
     def post(self, request):
-        token = request.data.get('check_in_token')
+        token = (request.data.get('check_in_token') or '').strip()
         if not token:
             return Response({'error': 'check_in_token is required'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1195,11 +1232,9 @@ class QRCheckInView(APIView):
             except Student.DoesNotExist:
                 return Response({'error': 'Invalid check-in token'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if not student.check_in_token_active:
-                return Response(
-                    {'error': 'Check-in token is deactivated'},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
+            blocked = _reject_if_check_in_deactivated(student, method='qr')
+            if blocked is not None:
+                return blocked
 
             today = timezone.localdate()
             if CheckIn.objects.select_for_update().filter(student=student, date=today).exists():
@@ -1298,31 +1333,6 @@ class CheckInLookupView(APIView):
         method = None
         if token:
             student = Student.objects.filter(check_in_token=token).first()
-            if student and not student.check_in_token_active:
-                enrollment = (
-                    ClassStudent.objects
-                    .select_related('class_obj')
-                    .filter(student=student)
-                    .first()
-                )
-                class_name = str(enrollment.class_obj) if enrollment and enrollment.class_obj else None
-                return Response(
-                    {
-                        'error': 'Check-in token is deactivated',
-                        'student': {
-                            'id': student.id,
-                            'name': student.name,
-                            'unique_code': student.unique_code,
-                            'class_name': class_name,
-                            'checked_in_today': CheckIn.objects.filter(
-                                student=student, date=timezone.localdate()
-                            ).exists(),
-                            'method': 'qr',
-                            'check_in_token_active': False,
-                        }
-                    },
-                    status=status.HTTP_403_FORBIDDEN,
-                )
             method = 'qr'
         if student is None and unique_code:
             student = Student.objects.filter(unique_code__iexact=unique_code).first()
@@ -1334,13 +1344,10 @@ class CheckInLookupView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        enrollment = (
-            ClassStudent.objects
-            .select_related('class_obj')
-            .filter(student=student)
-            .first()
-        )
-        class_name = str(enrollment.class_obj) if enrollment and enrollment.class_obj else None
+        # Soft-disabled QR blocks campus check-in entirely (QR and manual code).
+        blocked = _reject_if_check_in_deactivated(student, method=method or 'qr')
+        if blocked is not None:
+            return blocked
 
         already = CheckIn.objects.filter(
             student=student, date=timezone.localdate()
@@ -1350,7 +1357,7 @@ class CheckInLookupView(APIView):
             'id': student.id,
             'name': student.name,
             'unique_code': student.unique_code,
-            'class_name': class_name,
+            'class_name': _student_class_name(student),
             'checked_in_today': already,
             'method': method,
         }, status=status.HTTP_200_OK)
@@ -1457,6 +1464,10 @@ class ManualCheckInView(APIView):
                 student = Student.objects.select_for_update().get(id=student_id)
             except Student.DoesNotExist:
                 return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            blocked = _reject_if_check_in_deactivated(student, method='manual')
+            if blocked is not None:
+                return blocked
 
             today = timezone.localdate()
             if CheckIn.objects.select_for_update().filter(student=student, date=today).exists():

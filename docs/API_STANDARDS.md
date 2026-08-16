@@ -438,10 +438,16 @@ attendance-matrix cell writes.
 | Activate | `POST /students/{id}/activate_check_in_token/` | Staff+; `{ "check_in_token_active": true }` |
 | Deactivate | `POST /students/{id}/deactivate_check_in_token/` | Staff+; soft-disable without rotating secret |
 
-`Student.check_in_token_active` defaults to `true`. Inactive tokens:
+`Student.check_in_token_active` defaults to `true`. Inactive tokens block **all**
+campus check-in paths (not only the QR payload):
 
-- `POST /check-ins/qr/` → **403** `{"error": "Check-in token is deactivated"}`
-- `POST /check-ins/lookup/` (token path) → **403** with `error` **and** a safe nested `student` summary for the terminal confirmation card (`id`, `name`, `unique_code`, `class_name`, `checked_in_today`, `method`, `check_in_token_active: false`). Never returns the raw token.
+- `POST /check-ins/qr/` → **403** `{"error": "Check-in token is deactivated", "student": {…}}`
+- `POST /check-ins/lookup/` (token **or** unique_code) → **403** with the same shape
+- `POST /check-ins/manual/` → **403** with the same shape
+
+Lookup/manual still return a safe nested `student` summary for the terminal card
+(`id`, `name`, `unique_code`, `class_name`, `checked_in_today`, `method`,
+`check_in_token_active: false`). Never returns the raw token.
 
 Student list/detail serializers expose `check_in_token_active` only to staff/admin (same visibility rules as the token itself).
 
