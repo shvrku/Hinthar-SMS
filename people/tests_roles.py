@@ -6,7 +6,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory, APITestCase, APIClient
 
 from people.authentication import ClerkJWTAuthentication
-from people.models import Student
+from people.models import Student, Teacher
 from people.permissions import IsStaffOrAbove, CanCheckIn, IsAdmin
 from people.roles import ROLE_RANK, is_staff_or_above, can_check_in
 
@@ -225,3 +225,187 @@ class CheckInTokenListOmitTests(APITestCase):
         res = self.client.get(f'/api/v1/students/{self.student.id}/check_in_token/')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertIn('check_in_token', res.data)
+
+
+class StudentAccountLinkTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username='link_admin', role='admin', clerk_id='clerk_link_admin'
+        )
+        self.staff = User.objects.create_user(
+            username='link_staff', role='staff', clerk_id='clerk_link_staff'
+        )
+        self.pending = User.objects.create_user(
+            username='link_pending',
+            email='pending@example.com',
+            role='pending',
+            clerk_id='clerk_link_pending',
+        )
+        self.student_row = Student.objects.create(name='Unlinked Student')
+
+    def test_admin_link_sets_user_and_promotes_role(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            f'/api/v1/students/{self.student_row.id}/link_user/',
+            {'user_id': self.pending.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['user_id'], self.pending.id)
+        self.pending.refresh_from_db()
+        self.student_row.refresh_from_db()
+        self.assertEqual(self.pending.role, 'student')
+        self.assertEqual(self.student_row.user_id, self.pending.id)
+
+    def test_admin_unlink_clears_user_and_demotes_to_pending(self):
+        self.student_row.user = self.pending
+        self.student_row.save(update_fields=['user'])
+        self.pending.role = 'student'
+        self.pending.save(update_fields=['role'])
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(f'/api/v1/students/{self.student_row.id}/unlink_user/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.pending.refresh_from_db()
+        self.student_row.refresh_from_db()
+        self.assertIsNone(self.student_row.user_id)
+        self.assertEqual(self.pending.role, 'pending')
+
+    def test_staff_cannot_link(self):
+        self.client.force_authenticate(user=self.staff)
+        res = self.client.post(
+            f'/api/v1/students/{self.student_row.id}/link_user/',
+            {'user_id': self.pending.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_link_staff_role(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            f'/api/v1/students/{self.student_row.id}/link_user/',
+            {'user_id': self.staff.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.student_row.refresh_from_db()
+        self.assertIsNone(self.student_row.user_id)
+
+    def test_cannot_link_user_with_teacher_profile(self):
+        teacher_user = User.objects.create_user(
+            username='link_teacher', role='pending', clerk_id='clerk_link_teacher'
+        )
+        Teacher.objects.create(name='Already a teacher', user=teacher_user)
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            f'/api/v1/students/{self.student_row.id}/link_user/',
+            {'user_id': teacher_user.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_relink_without_unlink(self):
+        other = User.objects.create_user(
+            username='link_other', role='pending', clerk_id='clerk_link_other'
+        )
+        self.student_row.user = self.pending
+        self.student_row.save(update_fields=['user'])
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            f'/api/v1/students/{self.student_row.id}/link_user/',
+            {'user_id': other.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_linked_filters(self):
+        linked_user = User.objects.create_user(
+            username='already_linked', role='student', clerk_id='clerk_already_linked'
+        )
+        linked_student = Student.objects.create(name='Linked Student', user=linked_user)
+        self.client.force_authenticate(user=self.admin)
+
+        unmatched_users = self.client.get('/api/v1/users/', {'linked': 'false'})
+        self.assertEqual(unmatched_users.status_code, status.HTTP_200_OK)
+        unmatched_ids = {u['id'] for u in unmatched_users.data.get('results', unmatched_users.data)}
+        self.assertIn(self.pending.id, unmatched_ids)
+        self.assertNotIn(linked_user.id, unmatched_ids)
+
+        unmatched_students = self.client.get('/api/v1/students/', {'linked': 'false'})
+        self.assertEqual(unmatched_students.status_code, status.HTTP_200_OK)
+        unmatched_student_ids = {
+            s['id'] for s in unmatched_students.data.get('results', unmatched_students.data)
+        }
+        self.assertIn(self.student_row.id, unmatched_student_ids)
+        self.assertNotIn(linked_student.id, unmatched_student_ids)
+
+
+class StudentPortalMeTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username='portal_admin', role='admin', clerk_id='clerk_portal_admin'
+        )
+        self.pending = User.objects.create_user(
+            username='portal_pending', role='pending', clerk_id='clerk_portal_pending'
+        )
+        self.linked_user = User.objects.create_user(
+            username='portal_student', role='student', clerk_id='clerk_portal_student'
+        )
+        self.other_user = User.objects.create_user(
+            username='portal_other', role='student', clerk_id='clerk_portal_other'
+        )
+        self.student = Student.objects.create(name='Portal Student', user=self.linked_user)
+        self.other_student = Student.objects.create(name='Other Portal Student', user=self.other_user)
+        self.unlinked_student_user = User.objects.create_user(
+            username='portal_unlinked', role='student', clerk_id='clerk_portal_unlinked'
+        )
+
+    def test_linked_student_can_read_own_profile_with_token(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get('/api/v1/me/student/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['id'], self.student.id)
+        self.assertIn('check_in_token', res.data)
+        self.assertTrue(res.data['check_in_token'])
+
+    def test_linked_student_can_read_own_attendance_summary(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get('/api/v1/me/attendance-summary/', {'range': 'week'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['range'], 'week')
+        self.assertIn('campus', res.data)
+        self.assertIn('lesson', res.data)
+
+    def test_unlinked_student_gets_404(self):
+        self.client.force_authenticate(user=self.unlinked_student_user)
+        res = self.client.get('/api/v1/me/student/')
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_pending_cannot_use_me_student(self):
+        self.client.force_authenticate(user=self.pending)
+        res = self.client.get('/api/v1/me/student/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_student_still_denied_students_list(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get('/api/v1/students/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_student_denied_other_student_summary(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get(
+            f'/api/v1/students/{self.other_student.id}/attendance-summary/',
+            {'range': 'week'},
+        )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_student_denied_qr_mutations(self):
+        self.client.force_authenticate(user=self.linked_user)
+        for action in (
+            'regenerate_check_in_token',
+            'activate_check_in_token',
+            'deactivate_check_in_token',
+        ):
+            res = self.client.post(f'/api/v1/students/{self.student.id}/{action}/')
+            self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN, action)

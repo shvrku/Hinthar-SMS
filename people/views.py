@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -7,7 +7,8 @@ from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework import status
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes, inline_serializer
+from rest_framework import serializers as drf_serializers
 from people.serializers import (
     UserSerializer, AdminUserSerializer, SubjectSerializer, TeacherSerializer, StudentSerializer, StaffSerializer, AuditLogSerializer
 )
@@ -18,6 +19,24 @@ from people.student_analytics import VALID_RANGES, build_student_attendance_summ
 from people.teacher_analytics import build_teacher_attendance_summary
 
 User = get_user_model()
+
+LINKABLE_USER_ROLES = frozenset({'pending', 'student'})
+
+
+def _parse_linked_param(request):
+    raw = (request.query_params.get('linked') or '').strip().lower()
+    if raw in ('true', '1', 'yes'):
+        return True
+    if raw in ('false', '0', 'no'):
+        return False
+    return None
+
+
+def _user_has_other_profile(user):
+    return (
+        Teacher.objects.filter(user=user).exists()
+        or Staff.objects.filter(user=user).exists()
+    )
 
 
 class BulkOperationsMixin:
@@ -78,6 +97,83 @@ class MeView(APIView):
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
+
+
+class MeStudentView(APIView):
+    """Owner-scoped student profile + QR token. No student id in the URL."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: StudentSerializer},
+        summary="Get the linked student profile for the current user",
+        description=(
+            "Student role only. Returns 404 when the account is not matched to a "
+            "Student row. Includes the check-in token for the owner."
+        ),
+    )
+    def get(self, request):
+        if request.user.role != 'student':
+            return Response(
+                {'error': 'Student role required.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            student = (
+                Student.objects
+                .select_related('user')
+                .prefetch_related('enrolled_classes__class_obj')
+                .get(user=request.user)
+            )
+        except Student.DoesNotExist:
+            return Response(
+                {'error': 'Account is not linked to a student record.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = StudentSerializer(
+            student,
+            context={'request': request, 'include_check_in_token': True},
+        )
+        return Response(serializer.data)
+
+
+class MeAttendanceSummaryView(APIView):
+    """Owner-scoped campus + lesson attendance. No student id in the URL."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                'range',
+                OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Preset window: week | month | all (since enrollment)',
+                enum=sorted(VALID_RANGES),
+            ),
+        ],
+        summary='Own campus + lesson attendance summary',
+        description='Student role only. Uses the linked Student row for request.user.',
+    )
+    def get(self, request):
+        if request.user.role != 'student':
+            return Response(
+                {'error': 'Student role required.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            student = Student.objects.get(user=request.user)
+        except Student.DoesNotExist:
+            return Response(
+                {'error': 'Account is not linked to a student record.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        range_key = (request.query_params.get('range') or '').strip().lower()
+        if range_key not in VALID_RANGES:
+            return Response(
+                {'error': f'range must be one of: {", ".join(sorted(VALID_RANGES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(build_student_attendance_summary(student, range_key))
 
 
 class SubjectViewSet(BulkOperationsMixin, ModelViewSet):
@@ -191,6 +287,12 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
             except (TypeError, ValueError):
                 pass
 
+        linked = _parse_linked_param(self.request)
+        if linked is True:
+            qs = qs.filter(user__isnull=False)
+        elif linked is False:
+            qs = qs.filter(user__isnull=True)
+
         return qs
 
     @extend_schema(
@@ -281,6 +383,104 @@ class StudentViewSet(BulkOperationsMixin, ModelViewSet):
         payload = build_student_attendance_summary(student, range_key)
         return Response(payload)
 
+    @extend_schema(
+        request=inline_serializer(
+            name='LinkStudentUserRequest',
+            fields={'user_id': drf_serializers.IntegerField()},
+        ),
+        responses={200: StudentSerializer},
+        summary='Link a Clerk account to this student',
+        description=(
+            'Admin only. Sets Student.user and promotes the account role to student. '
+            'User must be pending or student, with no existing profile link.'
+        ),
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def link_user(self, request, pk=None):
+        student = self.get_object()
+        if student.user_id:
+            return Response(
+                {'error': 'This student is already linked to an account. Unlink first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw_id = request.data.get('user_id')
+        try:
+            user_id = int(raw_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'user_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            target = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if target.role not in LINKABLE_USER_ROLES:
+            return Response(
+                {'error': f'Cannot link a {target.role} account to a student.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if _user_has_other_profile(target):
+            return Response(
+                {'error': 'This account is already linked to a teacher or staff profile.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if Student.objects.filter(user=target).exists():
+            return Response(
+                {'error': 'This account is already linked to another student.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                student.user = target
+                student.save(update_fields=['user'])
+                if target.role != 'student':
+                    target.role = 'student'
+                    target.save(update_fields=['role'])
+        except IntegrityError:
+            return Response(
+                {'error': 'This account is already linked to a student.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.get_serializer(student)
+        return Response(serializer.data)
+
+    @extend_schema(
+        responses={200: StudentSerializer},
+        summary='Unlink the account from this student',
+        description=(
+            'Admin only. Clears Student.user. If the account role is student, '
+            'it is set back to pending.'
+        ),
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def unlink_user(self, request, pk=None):
+        student = self.get_object()
+        previous = student.user
+        if previous is None:
+            return Response(
+                {'error': 'This student is not linked to an account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            student.user = None
+            student.save(update_fields=['user'])
+            if previous.role == 'student':
+                previous.role = 'pending'
+                previous.save(update_fields=['role'])
+
+        serializer = self.get_serializer(student)
+        return Response(serializer.data)
+
 
 class StaffViewSet(BulkOperationsMixin, ModelViewSet):
     queryset = Staff.objects.select_related('user').order_by('id')
@@ -313,6 +513,12 @@ class UserViewSet(BulkOperationsMixin, ModelViewSet):
             )
         if role and role != 'all':
             qs = qs.filter(role=role)
+
+        linked = _parse_linked_param(self.request)
+        if linked is True:
+            qs = qs.filter(student_profile__isnull=False)
+        elif linked is False:
+            qs = qs.filter(student_profile__isnull=True)
 
         return qs
 
