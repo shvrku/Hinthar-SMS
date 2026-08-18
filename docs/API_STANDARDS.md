@@ -67,6 +67,7 @@ Map helpers to DRF permission classes with **predictable names**:
 | `IsTeacherOrAbove` | Admin + staff + terminal + teacher |
 | `IsAuthenticatedRole` | Any provisioned role |
 | `IsOwnerTeacher` / `IsOwnerStudent` | Object ownership (keep) |
+| `IsStudentOwnerOrStaffOrAdmin` | Owner student SAFE retrieve of own `Student` + attendance-summary; staff+ any |
 | `CanCheckIn` | Terminal write + staff/admin/teacher for manual check-in |
 | `ReadForTerminalWriteForStaff` | SAFE for terminal+; write for staff+ |
 
@@ -347,9 +348,10 @@ independent of lesson attendance (`/attendance/matrix/`). Invalid `date`,
 GET /api/v1/students/{id}/attendance-summary/?range=week|month|all
 ```
 
-Staff+ only. Scoped to one student and a preset window (`week` = Mon–today local,
+Staff+ or the linked owner student. Scoped to one student and a preset window (`week` = Mon–today local,
 `month` = month start–today, `all` = enrollment_date–today). Returns campus
 check-in and lesson roll **as separate objects** — never a single blended rate.
+Owner retrieve of another student's id is 404 (queryset scoped). Mutations stay staff+.
 
 Shape (conceptual):
 
@@ -433,6 +435,7 @@ attendance-matrix cell writes.
 
 | Action | Method / path | Notes |
 |--------|---------------|--------|
+| Retrieve student | `GET /students/{id}/` | Owner of that row, staff, or admin. List/create/update/delete stay staff+. Owner queryset is scoped to `user=request.user` (other ids → 404). |
 | Read token | `GET /students/{id}/check_in_token/` | Owner student, staff, or admin |
 | Regenerate | `POST /students/{id}/regenerate_check_in_token/` | Staff+; returns new token and sets `check_in_token_active: true` |
 | Activate | `POST /students/{id}/activate_check_in_token/` | Staff+; `{ "check_in_token_active": true }` |
