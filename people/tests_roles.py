@@ -2,13 +2,12 @@ from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from rest_framework import status
-from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory, APITestCase, APIClient
 
 from people.authentication import ClerkJWTAuthentication
 from people.models import Student, Teacher
 from people.permissions import IsStaffOrAbove, CanCheckIn, IsAdmin
-from people.roles import ROLE_RANK, is_staff_or_above, can_check_in
+from people.roles import ROLE_RANK, can_check_in, is_staff_or_above, role_rank
 
 User = get_user_model()
 
@@ -28,6 +27,14 @@ class RoleHelpersTest(TestCase):
         self.assertFalse(is_staff_or_above(terminal))
         self.assertTrue(can_check_in(terminal))
         self.assertFalse(can_check_in(pending))
+
+    def test_inactive_has_no_operational_rank(self):
+        admin = User.objects.create_user(
+            username='locked_adm', role='admin', clerk_id='c_locked_adm', is_active=False
+        )
+        self.assertEqual(role_rank(admin), -1)
+        self.assertFalse(is_staff_or_above(admin))
+        self.assertFalse(can_check_in(admin))
 
 
 class StaffOrAbovePermissionTest(TestCase):
@@ -65,6 +72,13 @@ class StaffOrAbovePermissionTest(TestCase):
         request.user = User.objects.create_user(username='adm', role='admin', clerk_id='c_adm')
         self.assertTrue(self.permission.has_permission(request, None))
 
+    def test_inactive_staff_denied(self):
+        request = self.factory.get('/api/v1/students/')
+        request.user = User.objects.create_user(
+            username='locked_staff', role='staff', clerk_id='c_locked_staff', is_active=False
+        )
+        self.assertFalse(self.permission.has_permission(request, None))
+
 
 class CanCheckInPermissionTest(TestCase):
     def setUp(self):
@@ -79,6 +93,13 @@ class CanCheckInPermissionTest(TestCase):
     def test_teacher_denied(self):
         request = self.factory.post('/api/v1/check-ins/qr/')
         request.user = User.objects.create_user(username='teach', role='teacher', clerk_id='c_teach')
+        self.assertFalse(self.permission.has_permission(request, None))
+
+    def test_inactive_terminal_denied(self):
+        request = self.factory.post('/api/v1/check-ins/qr/')
+        request.user = User.objects.create_user(
+            username='locked_term', role='terminal', clerk_id='c_locked_term', is_active=False
+        )
         self.assertFalse(self.permission.has_permission(request, None))
 
 
@@ -138,10 +159,40 @@ class StaffRouteRoleDenialTests(APITestCase):
 
 
 class InactiveUserAuthTests(APITestCase):
-    """SEC-H1: deactivated users cannot authenticate via mock auth."""
+    """Deactivated accounts keep JWT identity for GET /me/; other APIs stay 403."""
+
+    def test_me_without_token_unauthorized(self):
+        res = self.client.get('/api/v1/me/')
+        self.assertIn(res.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_inactive_staff_can_read_me_not_operational_apis(self):
+        user = User.objects.create_user(
+            username='locked_staff_me',
+            role='staff',
+            clerk_id='clerk_locked_staff_me',
+            is_active=False,
+        )
+        self.client.force_authenticate(user=user)
+        me = self.client.get('/api/v1/me/')
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertFalse(me.data['is_active'])
+        students = self.client.get('/api/v1/students/')
+        self.assertEqual(students.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_inactive_student_cannot_read_me_student(self):
+        user = User.objects.create_user(
+            username='locked_stu_me',
+            role='student',
+            clerk_id='clerk_locked_stu_me',
+            is_active=False,
+        )
+        Student.objects.create(name='Locked Student', user=user)
+        self.client.force_authenticate(user=user)
+        res = self.client.get('/api/v1/me/student/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
 
     @override_settings(DEBUG=True, ENABLE_MOCK_AUTH=True)
-    def test_inactive_mock_user_rejected(self):
+    def test_inactive_mock_jwt_still_authenticates(self):
         user = User.objects.create_user(
             username='user_mock_token_inactive',
             role='staff',
@@ -152,10 +203,19 @@ class InactiveUserAuthTests(APITestCase):
         factory = APIRequestFactory()
         request = factory.get('/api/v1/me/')
         request.META['HTTP_AUTHORIZATION'] = 'Bearer mock_token_inactive'
-        with self.assertRaises(AuthenticationFailed):
-            auth.authenticate(request)
-        user.refresh_from_db()
-        self.assertFalse(user.is_active)
+        result = auth.authenticate(request)
+        self.assertIsNotNone(result)
+        authenticated, token = result
+        self.assertEqual(authenticated.pk, user.pk)
+        self.assertFalse(authenticated.is_active)
+        self.assertEqual(token, 'mock_token_inactive')
+
+        client = APIClient()
+        me = client.get('/api/v1/me/', HTTP_AUTHORIZATION='Bearer mock_token_inactive')
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertFalse(me.data['is_active'])
+        blocked = client.get('/api/v1/students/', HTTP_AUTHORIZATION='Bearer mock_token_inactive')
+        self.assertEqual(blocked.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class LastAdminGuardTests(APITestCase):
@@ -538,4 +598,124 @@ class TeacherHubOwnerTests(APITestCase):
         self.client.force_authenticate(user=self.linked_user)
         res = self.client.get(f'/api/v1/teachers/{self.other_teacher.id}/')
         self.assertIn(res.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
+
+
+class UserDeleteAndDeactivateTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username='acct_admin', role='admin', clerk_id='clerk_acct_admin'
+        )
+        self.other_admin = User.objects.create_user(
+            username='acct_admin2', role='admin', clerk_id='clerk_acct_admin2'
+        )
+        self.staff = User.objects.create_user(
+            username='acct_staff', role='staff', clerk_id='clerk_acct_staff'
+        )
+        self.pending = User.objects.create_user(
+            username='acct_pending', role='pending', clerk_id='clerk_acct_pending'
+        )
+
+    def test_admin_can_deactivate_and_activate_staff(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.patch(
+            f'/api/v1/users/{self.staff.id}/',
+            {'is_active': False},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.staff.refresh_from_db()
+        self.assertFalse(self.staff.is_active)
+        res = self.client.patch(
+            f'/api/v1/users/{self.staff.id}/',
+            {'is_active': True},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.staff.refresh_from_db()
+        self.assertTrue(self.staff.is_active)
+
+    def test_cannot_deactivate_self(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.patch(
+            f'/api/v1/users/{self.admin.id}/',
+            {'is_active': False},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.admin.refresh_from_db()
+        self.assertTrue(self.admin.is_active)
+
+    def test_cannot_deactivate_last_active_admin(self):
+        self.admin.is_active = False
+        self.admin.save(update_fields=['is_active'])
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.patch(
+            f'/api/v1/users/{self.other_admin.id}/',
+            {'is_active': False},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.other_admin.refresh_from_db()
+        self.assertTrue(self.other_admin.is_active)
+
+    def test_cannot_delete_self(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(f'/api/v1/users/{self.admin.id}/')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_delete_last_admin(self):
+        self.other_admin.delete()
+        self.client.force_authenticate(user=self.staff)
+        # staff cannot hit the endpoint
+        res = self.client.delete(f'/api/v1/users/{self.admin.id}/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(f'/api/v1/users/{self.admin.id}/')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_delete_linked_student(self):
+        linked = User.objects.create_user(
+            username='acct_linked', role='student', clerk_id='clerk_acct_linked'
+        )
+        Student.objects.create(name='Linked Student', user=linked)
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(f'/api/v1/users/{linked.id}/')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(User.objects.filter(pk=linked.pk).exists())
+
+    def test_can_delete_unlinked_pending(self):
+        self.client.force_authenticate(user=self.admin)
+        pk = self.pending.pk
+        res = self.client.delete(f'/api/v1/users/{pk}/')
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(User.objects.filter(pk=pk).exists())
+
+    def test_list_includes_action_flags(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get('/api/v1/users/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        row = next(item for item in res.data['results'] if item['id'] == self.pending.id)
+        self.assertTrue(row['can_delete'])
+        self.assertIsNone(row['delete_blocked_reason'])
+        self.assertTrue(row['can_deactivate'])
+        self_row = next(item for item in res.data['results'] if item['id'] == self.admin.id)
+        self.assertFalse(self_row['can_delete'])
+        self.assertFalse(self_row['can_deactivate'])
+
+    def test_is_active_filter(self):
+        self.staff.is_active = False
+        self.staff.save(update_fields=['is_active'])
+        self.client.force_authenticate(user=self.admin)
+        active = self.client.get('/api/v1/users/', {'is_active': 'true'})
+        inactive = self.client.get('/api/v1/users/', {'is_active': 'false'})
+        self.assertEqual(active.status_code, status.HTTP_200_OK)
+        self.assertEqual(inactive.status_code, status.HTTP_200_OK)
+        active_ids = {item['id'] for item in active.data['results']}
+        inactive_ids = {item['id'] for item in inactive.data['results']}
+        self.assertIn(self.admin.id, active_ids)
+        self.assertNotIn(self.staff.id, active_ids)
+        self.assertIn(self.staff.id, inactive_ids)
+        self.assertNotIn(self.admin.id, inactive_ids)
+
 

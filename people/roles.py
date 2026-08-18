@@ -21,8 +21,17 @@ OPERATIONAL_ROLES = frozenset({'admin', 'staff'})
 CHECKIN_ROLES = frozenset({'admin', 'staff', 'terminal'})
 
 
+def is_active_account(user) -> bool:
+    """Signed-in Django row that is not deactivated. Anonymous is never active."""
+    return bool(
+        user
+        and getattr(user, 'is_authenticated', False)
+        and getattr(user, 'is_active', False)
+    )
+
+
 def role_rank(user) -> int:
-    if not user or not getattr(user, 'is_authenticated', False):
+    if not is_active_account(user):
         return -1
     return ROLE_RANK.get(getattr(user, 'role', None), -1)
 
@@ -48,7 +57,4 @@ def is_at_least(user, role: str) -> bool:
 
 
 def can_check_in(user) -> bool:
-    return (
-        getattr(user, 'is_authenticated', False)
-        and getattr(user, 'role', None) in CHECKIN_ROLES
-    )
+    return is_active_account(user) and getattr(user, 'role', None) in CHECKIN_ROLES

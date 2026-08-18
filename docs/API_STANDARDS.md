@@ -72,6 +72,7 @@ Map helpers to DRF permission classes with **predictable names**:
 | `IsStudentOwnerOrStaffOrAdmin` | Owner student SAFE retrieve of own `Student` + attendance-summary; staff+ any |
 | `IsTeacherOwnerOrStaffOrAdmin` | Owner teacher SAFE retrieve of own `Teacher` + attendance-summary; staff+ any |
 | `CanCheckIn` | Check-in **write**: `admin`, `staff`, `terminal` only (`people.roles.can_check_in`). Teachers do not operate the terminal. |
+| `IsActiveAuthenticated` | Signed-in **and** `is_active=true`. Use for owner-scoped `/me/student/`, `/me/attendance-summary/`, timetable owner reads. **Not** `GET /me/`. |
 | `ReadForTerminalWriteForStaff` | SAFE for terminal+; write for staff+ |
 
 **Default** (`REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES']`):
@@ -79,6 +80,20 @@ Map helpers to DRF permission classes with **predictable names**:
 - Keep denying unauthenticated users.
 - Prefer `IsStaffOrAbove` for mutating ViewSets.
 - Do **not** use bare `IsAuthenticated` for list endpoints that return school-wide data — teachers/students must be queryset-scoped.
+
+Operational helpers (`role_rank`, `is_admin`, `is_staff_or_above`, `can_check_in`, owner permission classes) require `is_active`. Deactivated users have rank `-1`.
+
+### Deactivated accounts (`is_active=false`)
+
+A valid JWT still authenticates. That is intentional:
+
+| Route | Deactivated + JWT | No JWT |
+|-------|-------------------|--------|
+| `GET /me/` | **200** with `is_active: false` (`IsAuthenticated`) | 401/403 |
+| `GET /me/student/`, `GET /me/attendance-summary/` | **403** | 401/403 |
+| Operational APIs (staff lists, check-in, hubs, timetables) | **403** | 401/403 |
+
+The dashboard uses `/me/` to show `/account-locked`. Do not reject inactive users in `ClerkJWTAuthentication`.
 
 ### Terminal rules
 
@@ -251,6 +266,37 @@ POST /api/v1/teachers/{id}/unlink_user/
 Refuse if the user already has a student, teacher, or staff profile. Dashboard:
 `/users/matching/students`, `/users/matching/teachers`.
 
+### Clerk webhook + Clerk Sync (admin)
+
+Clerk posts **directly at SMS** (not the Next proxy):
+
+```
+POST /api/v1/webhooks/clerk/
+```
+
+`AllowAny` + Svix (`svix-id`, `svix-timestamp`, `svix-signature`) using `CLERK_WEBHOOK_SECRET`. Missing/invalid secret → 401.
+
+| Event | Effect |
+|-------|--------|
+| `user.created` / `user.updated` | Upsert Django user by `clerk_id`. New rows are `pending`. Existing rows update email/username only. |
+| `user.deleted` / `user.banned` | `is_active=False`. Do not delete. |
+
+Admin report and repair (Users management → **Clerk Sync**):
+
+```
+GET  /api/v1/users/clerk_sync/
+POST /api/v1/users/clerk_import/          { "clerk_ids"?: string[] }
+POST /api/v1/users/{id}/clerk_link/       { "clerk_id": string }
+```
+
+| Field / action | Meaning |
+|----------------|---------|
+| `clerk_unlinked` | In this Clerk instance, not on any Django row. **Clerk Import** creates pending Django users. Omit `clerk_ids` to import all. |
+| `django_unlinked` | Django `clerk_id` is not in this Clerk instance (mock `clerk_mock_token_*` excluded). **Clerk Link** replaces it with one unused Clerk id. Keeps role and profile FKs. |
+| `clerk_dashboard_users_url` | Open Clerk Dashboard to create a user. Not Next `/sign-up`. |
+
+Import never attaches an existing Django row. Link never creates a Django row. Link picker = `clerk_unlinked`. 400 if the current id is already in this Clerk instance, or the new id is already on another Django row. 404 if the new Clerk user is missing. 502 if the Clerk Backend API fails.
+
 `GET /users/` extra filters (admin):
 
 | Param | Meaning |
@@ -259,6 +305,18 @@ Refuse if the user already has a student, teacher, or staff profile. Dashboard:
 | `linked_target` | `student` (default), `teacher`, `staff`, `any` |
 | `linkable` | `true` — role in the target linkable set and no profile |
 | `linkable_target` | `student` (default) or `teacher` |
+| `is_active` | `true` / `false` — User management status filter; omit for all |
+
+Admin `GET /users/` also includes `can_delete`, `delete_blocked_reason`, `can_deactivate`, `deactivate_blocked_reason`.
+
+```
+PATCH /api/v1/users/{id}/     { "role"?, "is_active"? }
+DELETE /api/v1/users/{id}/
+```
+
+Deactivate (`is_active=false`) is the default way to lock a login. It is refused for your own account and for the last active admin. A still-valid JWT may call `GET /me/` only; every other API returns 403. No token still fails auth.
+
+Hard delete is refused when the row is your own account, the last admin, or still linked to a student / teacher / staff profile (unlink first). Delete does not remove the Clerk user; audit log and check-in `performed_by` FKs SET_NULL. Prefer deactivate for anyone you might restore.
 
 ### Session list filters (Find sessions)
 
@@ -478,7 +536,9 @@ GET /api/v1/audit-logs/?page=&page_size=&category=
 `student | teacher | staff | class | session | check_in | user | other`.
 
 Each row includes `category` and human `summary` plus the historical
-`model_name` / `action` / `field_name` fields. Important events only (people /
+`model_name` / `action` / `field_name` fields. `user_email` is snapshotted when
+the event is written, so the actor label survives if that Django user is later
+deleted (`user` FK SET_NULL). Important events only (people /
 class CRUD, enroll, QR lifecycle, user role/`is_active`, generate-sessions
 summary, session status/delete, check-in create/undo). **Not logged:**
 attendance-matrix cell writes.

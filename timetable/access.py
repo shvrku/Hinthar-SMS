@@ -1,10 +1,10 @@
-from people.roles import is_staff_or_above
+from people.roles import is_active_account, is_staff_or_above
 from timetable.models import ClassStudent
 
 
 def can_read_teacher_timetable(user, teacher_id: int) -> bool:
     """Staff+ any teacher; linked teacher only their own weekly slots."""
-    if not user or not user.is_authenticated:
+    if not is_active_account(user):
         return False
     if is_staff_or_above(user):
         return True
@@ -16,7 +16,7 @@ def can_read_teacher_timetable(user, teacher_id: int) -> bool:
 
 def can_read_class_timetable(user, class_id: int) -> bool:
     """Staff+ any class; linked student only classes they are enrolled in."""
-    if not user or not user.is_authenticated:
+    if not is_active_account(user):
         return False
     if is_staff_or_above(user):
         return True

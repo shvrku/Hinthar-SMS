@@ -150,6 +150,7 @@ class AuditLog(models.Model):
     user = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='audit_logs'
     )
+    user_email = models.CharField(max_length=255, blank=True, default='')
     category = models.CharField(
         max_length=20, choices=CATEGORY_CHOICES, default='other', db_index=True
     )

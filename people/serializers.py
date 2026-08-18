@@ -46,14 +46,75 @@ class UserSerializer(serializers.ModelSerializer):
 class AdminUserSerializer(UserSerializer):
     """Admin-only write surface for role / is_active (SEC-L1)."""
 
+    can_delete = serializers.SerializerMethodField()
+    delete_blocked_reason = serializers.SerializerMethodField()
+    can_deactivate = serializers.SerializerMethodField()
+    deactivate_blocked_reason = serializers.SerializerMethodField()
+
     class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + [
+            'can_delete',
+            'delete_blocked_reason',
+            'can_deactivate',
+            'deactivate_blocked_reason',
+        ]
         read_only_fields = [
             'id',
             'clerk_id',
             'teacher_profile_id',
             'student_profile_id',
             'staff_profile_id',
+            'can_delete',
+            'delete_blocked_reason',
+            'can_deactivate',
+            'deactivate_blocked_reason',
         ]
+
+    def _actor(self):
+        request = self.context.get('request')
+        return getattr(request, 'user', None)
+
+    def _admin_counts(self):
+        cached = self.context.get('_user_admin_counts')
+        if cached is None:
+            cached = {
+                'admin': User.objects.filter(role='admin').count(),
+                'active_admin': User.objects.filter(role='admin', is_active=True).count(),
+            }
+            self.context['_user_admin_counts'] = cached
+        return cached
+
+    def _delete_blockers(self, obj):
+        from people.user_guards import delete_blockers
+        counts = self._admin_counts()
+        others = counts['admin'] - (1 if obj.role == 'admin' else 0)
+        return delete_blockers(obj, actor=self._actor(), other_admin_count=max(others, 0))
+
+    def _deactivate_blockers(self, obj):
+        from people.user_guards import deactivate_blockers
+        counts = self._admin_counts()
+        others = counts['active_admin'] - (1 if obj.role == 'admin' and obj.is_active else 0)
+        return deactivate_blockers(
+            obj, actor=self._actor(), other_active_admin_count=max(others, 0)
+        )
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_can_delete(self, obj):
+        return not self._delete_blockers(obj)
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_delete_blocked_reason(self, obj):
+        reasons = self._delete_blockers(obj)
+        return reasons[0] if reasons else None
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_can_deactivate(self, obj):
+        return not self._deactivate_blockers(obj)
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_deactivate_blocked_reason(self, obj):
+        reasons = self._deactivate_blockers(obj)
+        return reasons[0] if reasons else None
 
 class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
@@ -176,4 +237,6 @@ class AuditLogSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_user_email(self, obj):
+        if obj.user_email:
+            return obj.user_email
         return obj.user.email if obj.user else None

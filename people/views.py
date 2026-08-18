@@ -21,6 +21,7 @@ from people.audit import (
     log_event,
 )
 from people.permissions import (
+    IsActiveAuthenticated,
     IsAdmin,
     IsStaffOrAbove,
     IsStudentOwnerOrStaffOrAdmin,
@@ -28,7 +29,20 @@ from people.permissions import (
 )
 from people.roles import ROLE_RANK
 from people.student_analytics import VALID_RANGES, build_student_attendance_summary
+from people.clerk_backend import (
+    CLERK_DASHBOARD_USERS_URL,
+    ClerkBackendError,
+    get_clerk_user,
+    list_clerk_users,
+    public_clerk_user,
+)
+from people.clerk_users import (
+    identity_from_clerk_user,
+    relink_clerk_id,
+    upsert_from_clerk,
+)
 from people.teacher_analytics import build_teacher_attendance_summary
+from people.user_guards import deactivate_blockers, delete_blockers
 
 User = get_user_model()
 
@@ -105,7 +119,8 @@ class MeView(APIView):
     """
     Returns the authenticated user's profile info.
     JIT-provisioned on token validation (role=pending for new users).
-    Allowed for every authenticated role including pending.
+    Allowed for every authenticated role including pending and deactivated
+    (is_active=false) so the dashboard can show a lock screen. No JWT → 401.
     """
     permission_classes = [IsAuthenticated]
     
@@ -126,7 +141,7 @@ class MeView(APIView):
 
 class MeStudentView(APIView):
     """Owner-scoped student profile + QR token. No student id in the URL."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsActiveAuthenticated]
 
     @extend_schema(
         responses={200: StudentSerializer},
@@ -163,7 +178,7 @@ class MeStudentView(APIView):
 
 class MeAttendanceSummaryView(APIView):
     """Owner-scoped campus + lesson attendance. No student id in the URL."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsActiveAuthenticated]
 
     @extend_schema(
         parameters=[
@@ -697,7 +712,7 @@ class StaffViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     audit_label_attr = 'name'
 
 
-class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
+class UserViewSet(AuditActorMixin, ModelViewSet):
     """
     Account / role administration. Admin only.
     Staff operate the school but cannot elevate privileges.
@@ -708,7 +723,13 @@ class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
     serializer_class = AdminUserSerializer
     permission_classes = [IsAdmin]
     ordering = ['id']
-    http_method_names = ['get', 'head', 'options', 'patch', 'put']
+    http_method_names = ['get', 'head', 'options', 'patch', 'put', 'post', 'delete']
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {'error': 'Method not allowed.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -721,6 +742,12 @@ class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
             )
         if role and role != 'all':
             qs = qs.filter(role=role)
+
+        active = (self.request.query_params.get('is_active') or '').strip().lower()
+        if active in ('true', '1', 'yes'):
+            qs = qs.filter(is_active=True)
+        elif active in ('false', '0', 'no'):
+            qs = qs.filter(is_active=False)
 
         linked_target = (self.request.query_params.get('linked_target') or 'student').strip().lower()
         linked = _parse_linked_param(self.request)
@@ -788,10 +815,24 @@ class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
             )
         return None
 
+    def _validate_active_change(self, instance, data):
+        if 'is_active' not in data:
+            return None
+        new_active = data.get('is_active')
+        if new_active is True or new_active == instance.is_active:
+            return None
+        reasons = deactivate_blockers(instance, actor=self.request.user)
+        if reasons:
+            return Response({'error': reasons[0]}, status=status.HTTP_400_BAD_REQUEST)
+        return None
+
     def partial_update(self, request, *args, **kwargs):
         """Only allow role / is_active changes; never clerk_id or self-demotion traps."""
         instance = self.get_object()
         error = self._validate_role_change(instance, request.data)
+        if error is not None:
+            return error
+        error = self._validate_active_change(instance, request.data)
         if error is not None:
             return error
         return super().partial_update(request, *args, **kwargs)
@@ -800,6 +841,9 @@ class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
         """PUT must apply the same last-admin / role-validity guards as PATCH."""
         instance = self.get_object()
         error = self._validate_role_change(instance, request.data)
+        if error is not None:
+            return error
+        error = self._validate_active_change(instance, request.data)
         if error is not None:
             return error
         return super().update(request, *args, **kwargs)
@@ -834,6 +878,216 @@ class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
                 old_value=old_active,
                 new_value=instance.is_active,
             )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        reasons = delete_blockers(instance, actor=request.user)
+        if reasons:
+            return Response({'error': reasons[0]}, status=status.HTTP_400_BAD_REQUEST)
+        label = instance.email or instance.username
+        pk = instance.pk
+        log_event(
+            user=request.user,
+            category=CATEGORY_USER,
+            action='delete',
+            summary=f"Deleted account {label}",
+            model_name='User',
+            record_id=pk,
+        )
+        return super().destroy(request, *args, **kwargs)
+
+    def _django_clerk_ids(self):
+        return set(User.objects.values_list('clerk_id', flat=True))
+
+    def _clerk_sync_report(self):
+        clerk_users = list_clerk_users()
+        django_ids = self._django_clerk_ids()
+        clerk_ids = {item['id'] for item in clerk_users if item.get('id')}
+        clerk_unlinked = [
+            public_clerk_user(item)
+            for item in clerk_users
+            if item.get('id') and item['id'] not in django_ids
+        ]
+        django_unlinked = (
+            User.objects.select_related(
+                'teacher_profile', 'student_profile', 'staff_profile'
+            )
+            .exclude(clerk_id__in=clerk_ids)
+            .exclude(clerk_id__startswith='clerk_mock_token_')
+            .order_by('id')
+        )
+        return {
+            'clerk_unlinked': clerk_unlinked,
+            'django_unlinked': AdminUserSerializer(django_unlinked, many=True).data,
+            'clerk_dashboard_users_url': CLERK_DASHBOARD_USERS_URL,
+        }
+
+    @extend_schema(
+        responses={200: None, 502: None},
+        summary='Clerk Sync report',
+        description=(
+            'Admin only. Compare this Clerk instance to Django clerk_id values. '
+            'Does not mutate. clerk_unlinked are Import candidates and the Link picker. '
+            'django_unlinked need Clerk Link.'
+        ),
+    )
+    @action(detail=False, methods=['get'], url_path='clerk_sync')
+    def clerk_sync(self, request):
+        try:
+            return Response(self._clerk_sync_report())
+        except ClerkBackendError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @extend_schema(
+        request=inline_serializer(
+            name='ClerkImportRequest',
+            fields={
+                'clerk_ids': drf_serializers.ListField(
+                    child=drf_serializers.CharField(),
+                    required=False,
+                ),
+            },
+        ),
+        responses={201: AdminUserSerializer(many=True)},
+        summary='Clerk Import',
+        description=(
+            'Admin only. Create pending Django users for Clerk ids that are not on any Django row. '
+            'Omit clerk_ids to import every currently Clerk-unlinked user.'
+        ),
+    )
+    @action(detail=False, methods=['post'], url_path='clerk_import')
+    def clerk_import(self, request):
+        raw_ids = request.data.get('clerk_ids', None)
+        try:
+            if raw_ids is None:
+                report = self._clerk_sync_report()
+                clerk_ids = [item['clerk_id'] for item in report['clerk_unlinked']]
+                clerk_by_id = {item['clerk_id']: item for item in report['clerk_unlinked']}
+            else:
+                if not isinstance(raw_ids, list):
+                    return Response(
+                        {'error': 'clerk_ids must be a list of strings.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                clerk_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+                clerk_by_id = {}
+        except ClerkBackendError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        created_users = []
+        django_ids = self._django_clerk_ids()
+        for clerk_id in clerk_ids:
+            if clerk_id in django_ids:
+                return Response(
+                    {'error': f'Clerk id {clerk_id} is already on a Django user.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            public = clerk_by_id.get(clerk_id)
+            if public is None:
+                try:
+                    clerk_user = get_clerk_user(clerk_id)
+                except ClerkBackendError as exc:
+                    return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+                if clerk_user is None:
+                    return Response(
+                        {'error': f'Clerk user {clerk_id} was not found in this instance.'},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                public = public_clerk_user(clerk_user)
+            user, created = upsert_from_clerk(
+                clerk_id,
+                email=public.get('email') or '',
+                username=public.get('username') or clerk_id,
+            )
+            if not created:
+                return Response(
+                    {'error': f'Clerk id {clerk_id} is already on a Django user.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            django_ids.add(clerk_id)
+            created_users.append(user)
+            label = user.email or user.username
+            log_event(
+                user=request.user,
+                category=CATEGORY_USER,
+                action='create',
+                summary=f"Clerk Import created pending account {label}",
+                model_name='User',
+                record_id=user.pk,
+                field_name='clerk_id',
+                new_value=clerk_id,
+            )
+
+        return Response(
+            AdminUserSerializer(created_users, many=True).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        request=inline_serializer(
+            name='ClerkLinkRequest',
+            fields={'clerk_id': drf_serializers.CharField()},
+        ),
+        responses={200: AdminUserSerializer},
+        summary='Clerk Link',
+        description=(
+            'Admin only. Replace a Django-unlinked clerk_id with one unused Clerk id. '
+            'Keeps role and student/teacher FKs. Fails if the current id is already in this Clerk instance.'
+        ),
+    )
+    @action(detail=True, methods=['post'], url_path='clerk_link')
+    def clerk_link(self, request, pk=None):
+        instance = self.get_object()
+        new_clerk_id = (request.data.get('clerk_id') or '').strip()
+        if not new_clerk_id:
+            return Response(
+                {'error': 'clerk_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            current_in_clerk = get_clerk_user(instance.clerk_id)
+            new_clerk_user = get_clerk_user(new_clerk_id)
+        except ClerkBackendError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        if current_in_clerk is not None:
+            return Response(
+                {'error': 'This account is already linked to a user in this Clerk instance.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_clerk_user is None:
+            return Response(
+                {'error': 'That Clerk user was not found in this instance.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if User.objects.filter(clerk_id=new_clerk_id).exclude(pk=instance.pk).exists():
+            return Response(
+                {'error': 'That Clerk id is already on another Django user.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        _cid, email, username = identity_from_clerk_user(new_clerk_user)
+        old_clerk_id = instance.clerk_id
+        try:
+            relink_clerk_id(instance, new_clerk_id, email=email, username=username)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        instance.refresh_from_db()
+        label = instance.email or instance.username
+        log_event(
+            user=request.user,
+            category=CATEGORY_USER,
+            action='update',
+            summary=f"Clerk Link remapped {label}",
+            model_name='User',
+            record_id=instance.pk,
+            field_name='clerk_id',
+            old_value=old_clerk_id,
+            new_value=new_clerk_id,
+        )
+        return Response(AdminUserSerializer(instance).data)
 
 
 class AuditLogViewSet(ReadOnlyModelViewSet):

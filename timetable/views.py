@@ -2,7 +2,6 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.exceptions import NotFound, PermissionDenied
-from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
@@ -15,7 +14,7 @@ from timetable.utils import generate_sessions_for_slots
 from timetable.access import can_read_class_timetable, can_read_teacher_timetable
 from people.audit import AuditedViewSetMixin, log_sessions_generated
 from people.models import Teacher
-from people.permissions import IsStaffOrAbove
+from people.permissions import IsActiveAuthenticated, IsStaffOrAbove
 from people.views import BulkOperationsMixin
 from people.student_analytics import VALID_RANGES
 from timetable.class_analytics import build_class_attendance_summary
@@ -273,7 +272,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
 
 
 class TeacherTimetableView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsActiveAuthenticated]
 
     @extend_schema(
         summary="Teacher timetable",
@@ -295,7 +294,7 @@ class TeacherTimetableView(APIView):
 
 
 class ClassTimetableView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsActiveAuthenticated]
 
     @extend_schema(
         summary="Class timetable",
