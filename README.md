@@ -24,12 +24,15 @@ All under `/api/v1/`.
 | `GET /me/`                                                                         | Current user profile                               |
 | `GET /me/student/`, `GET /me/attendance-summary/`                                  | Linked student profile / own analytics             |
 | `GET /students/{id}/`, `GET /students/{id}/attendance-summary/`                    | Staff+ any; owner student own record only          |
-| `/users/`                                                                          | Accounts (staff+)                                  |
+| `/users/`                                                                          | Accounts (admin; matching filters `linked` / `linkable`) |
+| `POST /students/{id}/link_user/`, `POST …/unlink_user/`                            | Admin match Clerk account ↔ student                      |
+| `POST /teachers/{id}/link_user/`, `POST …/unlink_user/`                            | Admin match Clerk account ↔ teacher                      |
+| `GET /teachers/{id}/`, `GET /teachers/{id}/attendance-summary/`                    | Staff+ any; owner teacher own record only                |
 | `GET /audit-logs/`                                                                 | Important events (staff+; `category` + `summary`)  |
 | `/teachers/`, `/students/`, `/staff/`, `/subjects/`                                | People & catalog (+ `bulk_create` / `bulk_delete`) |
 | `/classes/`, `/class-students/`                                                    | Cohorts & enrollment                               |
 | `/timetable-slots/`                                                                | Recurring weekly slots                             |
-| `/timetable/teacher/{id}/`, `/timetable/class/{id}/`                               | Scoped timetable helpers                           |
+| `/timetable/teacher/{id}/`, `/timetable/class/{id}/`                               | Weekly slot **lists** (plain arrays; staff+ / owner) |
 | `/sessions/`, `/session-attendances/`                                              | Dated sessions & lesson attendance                 |
 | `GET /attendance/matrix/`                                                          | Class attendance aggregate (scoped)                |
 | `/adhoc-sessions/`, `/adhoc-session-attendances/`, `GET /adhoc-attendance/matrix/` | Tutoring / ad-hoc                                  |
@@ -45,7 +48,7 @@ All under `/api/v1/`.
 - **Lesson attendance** — Per-session status + class matrices (`null` = unmarked, not absent)
 - **Campus check-in** — QR / manual daily presence + school/class overview
 - **Overview** — `GET /stats/` for dashboard KPIs and a filtered audit preview
-- **Auth** — Clerk JWT; roles on Django `User` (`admin` > `staff` > `terminal` > `teacher` / `student`)
+- **Auth** — Clerk JWT; roles on Django `User` (`admin` > `staff` > `terminal` > `teacher` > `student` > `pending`)
 
 
 

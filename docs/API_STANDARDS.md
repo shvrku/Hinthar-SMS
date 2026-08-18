@@ -15,8 +15,9 @@ Canonical order (highest privilege first):
 | 5     | `admin`     | Full system control |
 | 4     | `staff`     | Day-to-day school operations (CRUD people, classes, sessions, attendance) |
 | 3     | `terminal`  | Slightly elevated kiosk account: **read** most operational data + **write** only on check-in / terminal routes |
-| 2     | `teacher`   | Own timetable, own sessions, own class attendance (scoped) |
+| 2     | `teacher`   | Own hub, own weekly timetable, own attendance-summary (scoped) |
 | 1     | `student`   | Own profile, own attendance/check-in token (scoped) |
+| 0     | `pending`   | Signed up, awaiting admin match to a student or teacher row |
 
 Roles live on `people.User.role` (Django), not Clerk public metadata, until an explicit sync policy is adopted.
 
@@ -27,6 +28,7 @@ Prefer **level checks** over ad-hoc `role in (...)` lists sprinkled across views
 ```python
 # people/roles.py (implemented)
 ROLE_RANK = {
+    'pending': 0,
     'student': 1,
     'teacher': 2,
     'terminal': 3,
@@ -35,9 +37,9 @@ ROLE_RANK = {
 }
 
 def role_rank(user) -> int:
-    if not user or not user.is_authenticated:
-        return 0
-    return ROLE_RANK.get(getattr(user, 'role', None), 0)
+    if not user or not getattr(user, 'is_authenticated', False):
+        return -1
+    return ROLE_RANK.get(getattr(user, 'role', None), -1)
 
 def is_admin(user) -> bool:
     return role_rank(user) >= ROLE_RANK['admin']
@@ -68,7 +70,8 @@ Map helpers to DRF permission classes with **predictable names**:
 | `IsAuthenticatedRole` | Any provisioned role |
 | `IsOwnerTeacher` / `IsOwnerStudent` | Object ownership (keep) |
 | `IsStudentOwnerOrStaffOrAdmin` | Owner student SAFE retrieve of own `Student` + attendance-summary; staff+ any |
-| `CanCheckIn` | Terminal write + staff/admin/teacher for manual check-in |
+| `IsTeacherOwnerOrStaffOrAdmin` | Owner teacher SAFE retrieve of own `Teacher` + attendance-summary; staff+ any |
+| `CanCheckIn` | Check-in **write**: `admin`, `staff`, `terminal` only (`people.roles.can_check_in`). Teachers do not operate the terminal. |
 | `ReadForTerminalWriteForStaff` | SAFE for terminal+; write for staff+ |
 
 **Default** (`REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES']`):
@@ -168,8 +171,7 @@ Unbounded list UIs must also support server-side search (`q`) and structured fil
 | `GET /stats/` | Fixed small payload |
 | `GET /me/` | Single object |
 | Small catalogs optionally | subjects / classes — may stay unpaginated **or** paginated for consistency |
-
-Timetable helper views that currently fake `{count, next: null, previous: null, results}` should either use real pagination or return a plain list — do not fake envelopes.
+| `GET /timetable/class/{id}/`, `GET /timetable/teacher/{id}/` | Bounded weekly slot lists — **plain JSON arrays**, not a fake page envelope |
 
 ### How to add a new paginated list route
 
@@ -208,6 +210,55 @@ Document aliases in OpenAPI `deprecated=True` until removed.
 - `GET /sessions/` and matrix/overview aggregates (already documented)
 
 Clients should send `class_id`; servers may still accept `class_obj_id` during the alias window.
+
+### Weekly timetable helpers (hubs)
+
+These return **weekly `TimetableSlot` rows**, not dated session occurrences. Do not
+rebuild a person timetable from `/sessions/`.
+
+```
+GET /api/v1/timetable/class/{class_id}/
+GET /api/v1/timetable/teacher/{teacher_id}/
+```
+
+Response: a **plain JSON array** of `TimetableSlot` (not `{count, next, previous, results}`).
+
+| Who | Class timetable | Teacher timetable |
+|-----|-----------------|-------------------|
+| Staff / admin | Any class | Any teacher |
+| Linked student | Only classes they are enrolled in | Denied |
+| Linked teacher | Denied | Only their own `teacher_id` |
+
+Unknown class/teacher id → **404** after the permission check. Writes stay on
+`/timetable-slots/` (staff+).
+
+### Account matching (admin)
+
+Admin-only. Links a Clerk `User` to a `Student` or `Teacher` row.
+
+```
+POST /api/v1/students/{id}/link_user/     { "user_id": <int> }
+POST /api/v1/students/{id}/unlink_user/
+POST /api/v1/teachers/{id}/link_user/     { "user_id": <int> }
+POST /api/v1/teachers/{id}/unlink_user/
+```
+
+| Target | Linkable `User.role` | On link | On unlink |
+|--------|----------------------|---------|-----------|
+| Student | `pending`, `student` | Sets `Student.user`, role → `student` | Clears FK; student-role account → `pending` |
+| Teacher | `pending`, `teacher` | Sets `Teacher.user`, role → `teacher` | Clears FK; teacher-role account → `pending` |
+
+Refuse if the user already has a student, teacher, or staff profile. Dashboard:
+`/users/matching/students`, `/users/matching/teachers`.
+
+`GET /users/` extra filters (admin):
+
+| Param | Meaning |
+|-------|---------|
+| `linked` | `true` / `false` — has a profile for `linked_target` |
+| `linked_target` | `student` (default), `teacher`, `staff`, `any` |
+| `linkable` | `true` — role in the target linkable set and no profile |
+| `linkable_target` | `student` (default) or `teacher` |
 
 ### Session list filters (Find sessions)
 
@@ -389,11 +440,12 @@ GET /api/v1/classes/{id}/attendance-summary/?range=week|month|all
 GET /api/v1/teachers/{id}/attendance-summary/?range=week|month|all
 ```
 
-Staff+ only. Same `range` semantics as the student summary. Campus check-in and
+Same `range` semantics as the student summary. Campus check-in and
 lesson roll stay **separately labeled** in the payload (never one blended rate).
 
-- **Class:** roster-scoped campus presence + lesson marks for that cohort.
-- **Teacher:** accountability (student rolls on sessions taught) + personal
+- **Class:** staff+ only. Roster-scoped campus presence + lesson marks for that cohort.
+- **Teacher:** staff+ any teacher; linked owner teacher may `GET` their own
+  `attendance-summary`. Accountability (student rolls on sessions taught) + personal
   presence derived from session status and assigned vs `actual_teacher`.
 
 `actual_teacher` on `Session` / `AdHocSession` is nullable: `null` means taught

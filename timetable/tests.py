@@ -198,3 +198,88 @@ class TimetableSlotClassFilterTests(APITestCase):
         self.client.force_authenticate(user=self.admin)
         res = self.client.get("/api/v1/timetable-slots/")
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class HubTimetableAccessTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="hub_tt_admin", role="admin", clerk_id="clerk_hub_tt_admin"
+        )
+        self.class_obj = Class.objects.create(education_level="IG", cohort_identifier="H")
+        self.other_class = Class.objects.create(education_level="IG", cohort_identifier="Z")
+        self.teacher_user = User.objects.create_user(
+            username="hub_tt_teacher", role="teacher", clerk_id="clerk_hub_tt_teacher"
+        )
+        self.other_teacher_user = User.objects.create_user(
+            username="hub_tt_other_teacher", role="teacher", clerk_id="clerk_hub_tt_other_t"
+        )
+        self.student_user = User.objects.create_user(
+            username="hub_tt_student", role="student", clerk_id="clerk_hub_tt_student"
+        )
+        self.other_student_user = User.objects.create_user(
+            username="hub_tt_other_student", role="student", clerk_id="clerk_hub_tt_other_s"
+        )
+        self.teacher = Teacher.objects.create(name="Hub TT Teacher", user=self.teacher_user)
+        self.other_teacher = Teacher.objects.create(
+            name="Hub TT Other Teacher", user=self.other_teacher_user
+        )
+        self.student = Student.objects.create(name="Hub TT Student", user=self.student_user)
+        Student.objects.create(name="Hub TT Other Student", user=self.other_student_user)
+        ClassStudent.objects.create(class_obj=self.class_obj, student=self.student)
+        self.subject = Subject.objects.create(name="Hub TT Subject")
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=1,
+            start_time="09:00",
+            end_time="10:00",
+        )
+
+    def test_staff_can_read_class_and_teacher_timetable(self):
+        self.client.force_authenticate(user=self.admin)
+        class_res = self.client.get(f"/api/v1/timetable/class/{self.class_obj.id}/")
+        teacher_res = self.client.get(f"/api/v1/timetable/teacher/{self.teacher.id}/")
+        self.assertEqual(class_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(teacher_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(class_res.data), 1)
+        self.assertEqual(teacher_res.data[0]["id"], self.slot.id)
+
+    def test_enrolled_student_can_read_own_class_timetable(self):
+        self.client.force_authenticate(user=self.student_user)
+        res = self.client.get(f"/api/v1/timetable/class/{self.class_obj.id}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data[0]["id"], self.slot.id)
+
+    def test_student_denied_other_class_timetable(self):
+        self.client.force_authenticate(user=self.student_user)
+        res = self.client.get(f"/api/v1/timetable/class/{self.other_class.id}/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unenrolled_student_denied_class_timetable(self):
+        self.client.force_authenticate(user=self.other_student_user)
+        res = self.client.get(f"/api/v1/timetable/class/{self.class_obj.id}/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_student_denied_teacher_timetable(self):
+        self.client.force_authenticate(user=self.student_user)
+        res = self.client.get(f"/api/v1/timetable/teacher/{self.teacher.id}/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_teacher_can_read_own_timetable(self):
+        self.client.force_authenticate(user=self.teacher_user)
+        res = self.client.get(f"/api/v1/timetable/teacher/{self.teacher.id}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data[0]["id"], self.slot.id)
+
+    def test_teacher_denied_other_teacher_timetable(self):
+        self.client.force_authenticate(user=self.teacher_user)
+        res = self.client.get(f"/api/v1/timetable/teacher/{self.other_teacher.id}/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_teacher_denied_class_timetable(self):
+        self.client.force_authenticate(user=self.teacher_user)
+        res = self.client.get(f"/api/v1/timetable/class/{self.class_obj.id}/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
