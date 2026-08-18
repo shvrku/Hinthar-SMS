@@ -36,8 +36,15 @@ ROLE_RANK = {
     'admin': 5,
 }
 
+def is_active_account(user) -> bool:
+    return bool(
+        user
+        and getattr(user, 'is_authenticated', False)
+        and getattr(user, 'is_active', False)
+    )
+
 def role_rank(user) -> int:
-    if not user or not getattr(user, 'is_authenticated', False):
+    if not is_active_account(user):
         return -1
     return ROLE_RANK.get(getattr(user, 'role', None), -1)
 
