@@ -4,6 +4,8 @@ The full cross-repo audit (security → correctness → performance) lives in th
 
 **[SYSTEM_AUDIT_FINDINGS.md](../../Hinthar-Dashboard/hinthar-dashboard/docs/SYSTEM_AUDIT_FINDINGS.md)**
 
+Historical 2026-08-07 snapshot. Matching, owner hubs, and owner-read timetables are documented in `API_STANDARDS.md`, not in that audit table.
+
 If that relative path does not resolve in your checkout layout, open:
 
 `Hinthar-Dashboard/hinthar-dashboard/docs/SYSTEM_AUDIT_FINDINGS.md`

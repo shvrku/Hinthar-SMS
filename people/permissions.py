@@ -51,8 +51,8 @@ class IsTerminalOrAbove(permissions.BasePermission):
 
 class CanCheckIn(permissions.BasePermission):
     """
-    Check-in write access: terminal, staff, admin.
-    Teachers are excluded until a teacher portal exists (D1).
+    Check-in write access: admin, staff, terminal (`people.roles.can_check_in`).
+    Teachers use their hub; they do not operate the terminal.
     """
 
     def has_permission(self, request, view):
@@ -60,7 +60,7 @@ class CanCheckIn(permissions.BasePermission):
 
 
 class IsOwnerTeacher(permissions.BasePermission):
-    """Teacher role + object ownership (for future teacher portal)."""
+    """Teacher role + object ownership (own hub retrieve)."""
 
     def has_permission(self, request, view):
         return (

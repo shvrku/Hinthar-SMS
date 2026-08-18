@@ -11,6 +11,8 @@ Cross-repo plan aligns **Hinthar-SMS** and **Hinthar-Dashboard** with:
 
 **Last status update:** 2026-08-17 — **this plan is complete** (phases 0–9).
 
+Historical pointer only. Live contracts: `docs/API_STANDARDS.md` (this repo) and Dashboard `FRONTEND_STANDARDS.md`. Matching, owner hubs, and owner-read timetables landed after this table froze.
+
 ---
 
 ## Status at a glance

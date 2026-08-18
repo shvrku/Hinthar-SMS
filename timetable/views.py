@@ -1,6 +1,8 @@
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
@@ -10,7 +12,9 @@ from timetable.serializers import (
     ClassSerializer, ClassStudentSerializer, ClassStudentListSerializer, TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
+from timetable.access import can_read_class_timetable, can_read_teacher_timetable
 from people.audit import AuditedViewSetMixin, log_sessions_generated
+from people.models import Teacher
 from people.permissions import IsStaffOrAbove
 from people.views import BulkOperationsMixin
 from people.student_analytics import VALID_RANGES
@@ -269,38 +273,44 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
 
 
 class TeacherTimetableView(APIView):
-    permission_classes = [IsStaffOrAbove]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(
         summary="Teacher timetable",
-        description="Get all timetable slots for a specific teacher.",
+        description=(
+            "Weekly TimetableSlot rows assigned to this teacher (not dated sessions). "
+            "Staff+ any teacher; linked teacher only their own id."
+        ),
         responses=TimetableSlotSerializer(many=True),
     )
     def get(self, request, teacher_id):
+        teacher_id = int(teacher_id)
+        if not can_read_teacher_timetable(request.user, teacher_id):
+            raise PermissionDenied()
+        if not Teacher.objects.filter(pk=teacher_id).exists():
+            raise NotFound()
         slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(teacher_id=teacher_id).order_by('id')
         serializer = TimetableSlotSerializer(slots, many=True)
-        return Response({
-            'count': len(serializer.data),
-            'next': None,
-            'previous': None,
-            'results': serializer.data
-        })
+        return Response(serializer.data)
 
 
 class ClassTimetableView(APIView):
-    permission_classes = [IsStaffOrAbove]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(
         summary="Class timetable",
-        description="Get all timetable slots for a specific class.",
+        description=(
+            "Weekly TimetableSlot rows for this class (not dated sessions). "
+            "Staff+ any class; linked student only classes they are enrolled in."
+        ),
         responses={200: TimetableSlotSerializer(many=True)},
     )
     def get(self, request, class_id):
+        class_id = int(class_id)
+        if not can_read_class_timetable(request.user, class_id):
+            raise PermissionDenied()
+        if not Class.objects.filter(pk=class_id).exists():
+            raise NotFound()
         slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(class_obj_id=class_id).order_by('id')
         serializer = TimetableSlotSerializer(slots, many=True)
-        return Response({
-            'count': len(serializer.data),
-            'next': None,
-            'previous': None,
-            'results': serializer.data
-        })
+        return Response(serializer.data)
