@@ -2,10 +2,20 @@ from rest_framework import permissions
 
 from people.roles import (
     can_check_in,
+    is_active_account,
     is_admin,
     is_staff_or_above,
     is_terminal_or_above,
 )
+
+
+class IsActiveAuthenticated(permissions.BasePermission):
+    """Any signed-in user whose Django row is still active. Not GET /me/."""
+
+    message = 'This account has been deactivated.'
+
+    def has_permission(self, request, view):
+        return is_active_account(request.user)
 
 
 class IsAuthenticatedNonTerminal(permissions.BasePermission):
@@ -15,7 +25,7 @@ class IsAuthenticatedNonTerminal(permissions.BasePermission):
     """
 
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        if not is_active_account(request.user):
             return False
         if is_staff_or_above(request.user):
             return True
@@ -63,10 +73,7 @@ class IsOwnerTeacher(permissions.BasePermission):
     """Teacher role + object ownership (own hub retrieve)."""
 
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.role == 'teacher'
-        )
+        return is_active_account(request.user) and request.user.role == 'teacher'
 
     def has_object_permission(self, request, view, obj):
         if not hasattr(request.user, 'teacher_profile') or not request.user.teacher_profile:
@@ -79,10 +86,7 @@ class IsOwnerTeacher(permissions.BasePermission):
 
 class IsOwnerStudent(permissions.BasePermission):
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.role == 'student'
-        )
+        return is_active_account(request.user) and request.user.role == 'student'
 
     def has_object_permission(self, request, view, obj):
         if not hasattr(request.user, 'student_profile') or not request.user.student_profile:
@@ -95,10 +99,7 @@ class IsOwnerStudent(permissions.BasePermission):
 
 class IsOwnerStaff(permissions.BasePermission):
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.role == 'staff'
-        )
+        return is_active_account(request.user) and request.user.role == 'staff'
 
     def has_object_permission(self, request, view, obj):
         if not hasattr(request.user, 'staff_profile') or not request.user.staff_profile:
@@ -111,7 +112,7 @@ class IsOwnerStaff(permissions.BasePermission):
 
 class IsStudentOwnerOrStaffOrAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
-        return request.user.is_authenticated
+        return is_active_account(request.user)
 
     def has_object_permission(self, request, view, obj):
         if is_staff_or_above(request.user):
@@ -125,7 +126,7 @@ class IsTeacherOwnerOrStaffOrAdmin(permissions.BasePermission):
     """Owner teacher may read their own hub; staff/admin keep full access."""
 
     def has_permission(self, request, view):
-        return request.user.is_authenticated
+        return is_active_account(request.user)
 
     def has_object_permission(self, request, view, obj):
         if is_staff_or_above(request.user):
@@ -142,7 +143,7 @@ class IsAdminOrReadOnlyAuthenticated(permissions.BasePermission):
     """
 
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        if not is_active_account(request.user):
             return False
         if is_admin(request.user):
             return True
@@ -153,7 +154,7 @@ class IsStaffOrAdminOrReadOnlyAuthenticated(permissions.BasePermission):
     """Deprecated — prefer IsStaffOrAbove for both read and write."""
 
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        if not is_active_account(request.user):
             return False
         if is_staff_or_above(request.user):
             return True

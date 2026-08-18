@@ -52,6 +52,35 @@ class AuditLogApiTests(APITestCase):
         rows = res.data['results'] if isinstance(res.data, dict) else res.data
         self.assertTrue(any(row['summary'] == 'Created student Ada Lovelace' for row in rows))
 
+    def test_actor_email_survives_user_delete(self):
+        actor = User.objects.create_user(
+            username='doomed_admin',
+            role='admin',
+            clerk_id='doomed_admin',
+            email='doomed@example.com',
+        )
+        leftover = User.objects.create_user(
+            username='keep_pending',
+            role='pending',
+            clerk_id='keep_pending',
+        )
+        self.client.force_authenticate(user=actor)
+        res = self.client.delete(f'/api/v1/users/{leftover.id}/')
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        log = AuditLog.objects.get(category='user', action='delete', record_id=str(leftover.id))
+        self.assertEqual(log.user_email, 'doomed@example.com')
+        actor_id = actor.id
+        User.objects.filter(pk=actor_id).delete()
+        log.refresh_from_db()
+        self.assertIsNone(log.user_id)
+        self.assertEqual(log.user_email, 'doomed@example.com')
+        self.client.force_authenticate(user=self.staff)
+        listed = self.client.get('/api/v1/audit-logs/', {'page_size': 200})
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        rows = listed.data['results'] if isinstance(listed.data, dict) else listed.data
+        match = next(row for row in rows if row['id'] == log.id)
+        self.assertEqual(match['user_email'], 'doomed@example.com')
+
     def test_teacher_cannot_list_audit_logs(self):
         self.client.force_authenticate(user=self.teacher_user)
         res = self.client.get('/api/v1/audit-logs/')

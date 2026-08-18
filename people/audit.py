@@ -69,8 +69,12 @@ def log_event(
     if is_muted():
         return None
     actor = current_actor(user)
+    actor_email = ''
+    if actor is not None:
+        actor_email = (getattr(actor, 'email', None) or getattr(actor, 'username', None) or '')[:255]
     return AuditLog.objects.create(
         user=actor,
+        user_email=actor_email,
         category=category,
         summary=(summary or '')[:255],
         model_name=model_name or '',

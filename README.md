@@ -21,8 +21,8 @@ All under `/api/v1/`.
 
 | Endpoint                                                                           | Description                                        |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `GET /me/`                                                                         | Current user profile                               |
-| `GET /me/student/`, `GET /me/attendance-summary/`                                  | Linked student profile / own analytics             |
+| `GET /me/`                                                                         | Current user; **allowed when deactivated** (`is_active: false`) |
+| `GET /me/student/`, `GET /me/attendance-summary/`                                  | Linked student profile / own analytics; **active accounts only** |
 | `GET /students/{id}/`, `GET /students/{id}/attendance-summary/`                    | Staff+ any; owner student own record only          |
 | `/users/`                                                                          | Accounts (admin; matching filters `linked` / `linkable`) |
 | `POST /students/{id}/link_user/`, `POST …/unlink_user/`                            | Admin match Clerk account ↔ student                      |

@@ -8,6 +8,8 @@ from django.core.cache import cache
 from rest_framework import authentication, exceptions
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
 
+from people.clerk_users import DEFAULT_ROLE, upsert_from_clerk
+
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
@@ -24,14 +26,14 @@ class ClerkJWTAuthenticationScheme(OpenApiAuthenticationExtension):
             'description': 'Clerk-issued JWT token.',
         }
 
-DEFAULT_ROLE = 'pending'
-
 class ClerkJWTAuthentication(authentication.BaseAuthentication):
     """
     Custom DRF authentication class for Clerk JWT verification.
     
     Clerk handles identity (who you are). Roles are managed locally
     in the Django User model via the admin panel — NOT synced from Clerk.
+    Deactivated users (`is_active=False`) still authenticate so GET /me/
+    can return the lock-screen payload. Operational APIs require is_active.
     """
 
     def authenticate(self, request):
@@ -51,12 +53,6 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
 
         return self._authenticate_clerk(token)
 
-    def _reject_if_inactive(self, user):
-        """SEC-H1: deactivated accounts must not authenticate."""
-        if not user.is_active:
-            raise exceptions.AuthenticationFailed("User account is deactivated.")
-        return user
-
     def _authenticate_mock(self, token):
         """
         Helper for local testing without real Clerk endpoints.
@@ -68,7 +64,6 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
 
         existing = User.objects.filter(clerk_id=clerk_id).first()
         if existing:
-            self._reject_if_inactive(existing)
             return (existing, token)
 
         # SEC-L2: cap unbounded mock user creation
@@ -84,8 +79,6 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
             is_staff=False,
             is_superuser=False,
         )
-
-        self._reject_if_inactive(user)
         return (user, token)
 
     def _fetch_jwks(self, jwks_url, *, force_refresh=False):
@@ -178,45 +171,8 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
 
         email, username = self._identity_from_claims(payload, clerk_id)
 
-        user, created = self._get_or_provision_user(clerk_id, email=email, username=username)
-
-        if not created:
-            self._sync_identity(user, email=email, username=username)
-
-        self._reject_if_inactive(user)
+        user, _created = upsert_from_clerk(clerk_id, email=email, username=username)
         return (user, token)
-
-    def _get_or_provision_user(self, clerk_id, *, email: str, username: str):
-        """Load the local user with profiles; only get_or_create on a miss."""
-        qs = User.objects.select_related(
-            'teacher_profile', 'student_profile', 'staff_profile'
-        )
-        cache_key = f'clerk_user_pk:{clerk_id}'
-        pk = cache.get(cache_key)
-        if pk:
-            user = qs.filter(pk=pk, clerk_id=clerk_id).first()
-            if user:
-                return user, False
-
-        user = qs.filter(clerk_id=clerk_id).first()
-        if user:
-            cache.set(cache_key, user.pk, 60)
-            return user, False
-
-        user, created = User.objects.get_or_create(
-            clerk_id=clerk_id,
-            defaults={
-                'username': username,
-                'email': email,
-                'role': DEFAULT_ROLE,
-                'is_staff': False,
-                'is_superuser': False,
-            },
-        )
-        if not created:
-            user = qs.get(pk=user.pk)
-        cache.set(cache_key, user.pk, 60)
-        return user, created
 
     @staticmethod
     def _identity_from_claims(payload, clerk_id: str) -> tuple[str, str]:
@@ -251,21 +207,3 @@ class ClerkJWTAuthentication(authentication.BaseAuthentication):
             username = clerk_id
 
         return email, username
-
-    @staticmethod
-    def _sync_identity(user, *, email: str, username: str) -> None:
-        """Update email/username from Clerk without touching role."""
-        update_fields: list[str] = []
-
-        if email and user.email != email:
-            user.email = email
-            update_fields.append('email')
-
-        if username and user.username != username:
-            taken = User.objects.filter(username=username).exclude(pk=user.pk).exists()
-            if not taken:
-                user.username = username
-                update_fields.append('username')
-
-        if update_fields:
-            user.save(update_fields=update_fields)

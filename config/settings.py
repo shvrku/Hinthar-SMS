@@ -209,6 +209,8 @@ CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY", "")
 CLERK_JWT_ISSUER = os.getenv("CLERK_JWT_ISSUER", "") or os.getenv("CLERK_FRONTEND_API", "")
 # Audience claim — required when DEBUG=False so tokens are bound to this API.
 CLERK_JWT_AUDIENCE = os.getenv("CLERK_JWT_AUDIENCE", "")
+# Signing secret from Clerk Dashboard → Webhooks (svix). Distinct per instance.
+CLERK_WEBHOOK_SECRET = os.getenv("CLERK_WEBHOOK_SECRET", "")
 
 # Mock Authentication — opt-in only. Requires BOTH DEBUG=True and ENABLE_MOCK_AUTH=true.
 ENABLE_MOCK_AUTH = os.getenv("ENABLE_MOCK_AUTH", "false").lower() == "true"

@@ -11,6 +11,7 @@ from people.views import (
     UserViewSet,
     AuditLogViewSet,
 )
+from people.webhooks import ClerkWebhookView
 
 router = DefaultRouter()
 router.register(r'subjects', SubjectViewSet)
@@ -25,4 +26,5 @@ urlpatterns = [
     path('me/', MeView.as_view(), name='me'),
     path('me/student/', MeStudentView.as_view(), name='me-student'),
     path('me/attendance-summary/', MeAttendanceSummaryView.as_view(), name='me-attendance-summary'),
+    path('webhooks/clerk/', ClerkWebhookView.as_view(), name='clerk-webhook'),
 ]
