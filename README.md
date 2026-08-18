@@ -23,6 +23,7 @@ All under `/api/v1/`.
 | ---------------------------------------------------------------------------------- | -------------------------------------------------- |
 | `GET /me/`                                                                         | Current user profile                               |
 | `GET /me/student/`, `GET /me/attendance-summary/`                                  | Linked student profile / own analytics             |
+| `GET /students/{id}/`, `GET /students/{id}/attendance-summary/`                    | Staff+ any; owner student own record only          |
 | `/users/`                                                                          | Accounts (staff+)                                  |
 | `GET /audit-logs/`                                                                 | Important events (staff+; `category` + `summary`)  |
 | `/teachers/`, `/students/`, `/staff/`, `/subjects/`                                | People & catalog (+ `bulk_create` / `bulk_delete`) |

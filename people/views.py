@@ -286,8 +286,26 @@ class StudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
             ctx['include_check_in_token'] = True
         return ctx
 
+    def _is_owner(self, request):
+        """True when the requester is the student who owns this resource."""
+        return (
+            request.user.is_authenticated
+            and request.user.role == 'student'
+        )
+
+    def get_permissions(self):
+        """Owner may retrieve their own record + attendance-summary; mutations remain staff-only."""
+        if self.action in ('retrieve', 'attendance_summary'):
+            return [IsStudentOwnerOrStaffOrAdmin()]
+        return super().get_permissions()
+
     def get_queryset(self):
         qs = super().get_queryset().prefetch_related('enrolled_classes__class_obj')
+
+        # Owner (student role): scope to their own record for safe read actions.
+        if self._is_owner(self.request) and self.action in ('retrieve', 'attendance_summary'):
+            return qs.filter(user=self.request.user)
+
         q = (self.request.query_params.get('q') or '').strip()
         school_code = self.request.query_params.get('school_code')
         class_id = self.request.query_params.get('class_id')
@@ -417,14 +435,15 @@ class StudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
         ],
         summary='Student campus + lesson attendance summary',
         description=(
-            'Staff+. Campus check-in and lesson roll are returned as separate objects. '
-            'Never blend them into a single rate.'
+            'Owner student, staff, or admin. Campus check-in and lesson roll are returned '
+            'as separate objects. Never blend them into a single rate.'
         ),
     )
     @action(detail=True, methods=['get'], url_path='attendance-summary',
-            permission_classes=[IsStaffOrAbove])
+            permission_classes=[IsStudentOwnerOrStaffOrAdmin])
     def attendance_summary(self, request, pk=None):
         student = self.get_object()
+        self.check_object_permissions(request, student)
         range_key = (request.query_params.get('range') or '').strip().lower()
         if range_key not in VALID_RANGES:
             return Response(

@@ -246,3 +246,74 @@ class PeoplePageBoundaryListTests(APITestCase):
         self._assert_page_boundary("/api/v1/users/")
 
 
+class StudentOwnerRetrieveTests(APITestCase):
+    """Owner (student role) can retrieve own record + attendance-summary; not others'."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = User.objects.create_user(
+            username="staff_owner_test", role="staff", clerk_id="clerk_staff_owner"
+        )
+        self.owner_user = User.objects.create_user(
+            username="owner_student", role="student", clerk_id="clerk_owner_student"
+        )
+        self.other_user = User.objects.create_user(
+            username="other_student", role="student", clerk_id="clerk_other_student"
+        )
+        self.owner_student = Student.objects.create(
+            name="Owner Student", user=self.owner_user
+        )
+        self.other_student = Student.objects.create(
+            name="Other Student", user=self.other_user
+        )
+
+    def test_owner_get_own_student_200(self):
+        self.client.force_authenticate(user=self.owner_user)
+        res = self.client.get(f"/api/v1/students/{self.owner_student.pk}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["id"], self.owner_student.pk)
+        self.assertIn("check_in_token", res.data)
+
+    def test_owner_get_other_student_404(self):
+        self.client.force_authenticate(user=self.owner_user)
+        res = self.client.get(f"/api/v1/students/{self.other_student.pk}/")
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_owner_list_students_403(self):
+        self.client.force_authenticate(user=self.owner_user)
+        res = self.client.get("/api/v1/students/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_patch_own_student_403(self):
+        self.client.force_authenticate(user=self.owner_user)
+        res = self.client.patch(
+            f"/api/v1/students/{self.owner_student.pk}/",
+            {"name": "Hacked"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_get_any_student_200(self):
+        self.client.force_authenticate(user=self.staff)
+        res = self.client.get(f"/api/v1/students/{self.other_student.pk}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+    def test_owner_attendance_summary_200(self):
+        self.client.force_authenticate(user=self.owner_user)
+        res = self.client.get(
+            f"/api/v1/students/{self.owner_student.pk}/attendance-summary/",
+            {"range": "month"},
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("lesson", res.data)
+        self.assertIn("campus", res.data)
+
+    def test_owner_attendance_summary_other_404(self):
+        self.client.force_authenticate(user=self.owner_user)
+        res = self.client.get(
+            f"/api/v1/students/{self.other_student.pk}/attendance-summary/",
+            {"range": "month"},
+        )
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+
