@@ -409,3 +409,133 @@ class StudentPortalMeTests(APITestCase):
         ):
             res = self.client.post(f'/api/v1/students/{self.student.id}/{action}/')
             self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN, action)
+
+
+class TeacherAccountLinkTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username='tlink_admin', role='admin', clerk_id='clerk_tlink_admin'
+        )
+        self.staff = User.objects.create_user(
+            username='tlink_staff', role='staff', clerk_id='clerk_tlink_staff'
+        )
+        self.pending = User.objects.create_user(
+            username='tlink_pending',
+            email='tpending@example.com',
+            role='pending',
+            clerk_id='clerk_tlink_pending',
+        )
+        self.teacher_row = Teacher.objects.create(name='Unlinked Teacher')
+
+    def test_admin_link_sets_user_and_promotes_role(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            f'/api/v1/teachers/{self.teacher_row.id}/link_user/',
+            {'user_id': self.pending.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['user_id'], self.pending.id)
+        self.pending.refresh_from_db()
+        self.teacher_row.refresh_from_db()
+        self.assertEqual(self.pending.role, 'teacher')
+        self.assertEqual(self.teacher_row.user_id, self.pending.id)
+
+    def test_admin_unlink_clears_user_and_demotes_to_pending(self):
+        self.teacher_row.user = self.pending
+        self.teacher_row.save(update_fields=['user'])
+        self.pending.role = 'teacher'
+        self.pending.save(update_fields=['role'])
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(f'/api/v1/teachers/{self.teacher_row.id}/unlink_user/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.pending.refresh_from_db()
+        self.teacher_row.refresh_from_db()
+        self.assertIsNone(self.teacher_row.user_id)
+        self.assertEqual(self.pending.role, 'pending')
+
+    def test_staff_cannot_link(self):
+        self.client.force_authenticate(user=self.staff)
+        res = self.client.post(
+            f'/api/v1/teachers/{self.teacher_row.id}/link_user/',
+            {'user_id': self.pending.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_link_staff_role(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            f'/api/v1/teachers/{self.teacher_row.id}/link_user/',
+            {'user_id': self.staff.id},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.teacher_row.refresh_from_db()
+        self.assertIsNone(self.teacher_row.user_id)
+
+    def test_linked_filters(self):
+        linked_user = User.objects.create_user(
+            username='talready_linked', role='teacher', clerk_id='clerk_talready_linked'
+        )
+        linked_teacher = Teacher.objects.create(name='Linked Teacher', user=linked_user)
+        self.client.force_authenticate(user=self.admin)
+
+        unmatched_users = self.client.get(
+            '/api/v1/users/',
+            {'linked': 'false', 'linked_target': 'teacher', 'linkable': 'true', 'linkable_target': 'teacher'},
+        )
+        self.assertEqual(unmatched_users.status_code, status.HTTP_200_OK)
+        unmatched_ids = {u['id'] for u in unmatched_users.data.get('results', unmatched_users.data)}
+        self.assertIn(self.pending.id, unmatched_ids)
+        self.assertNotIn(linked_user.id, unmatched_ids)
+
+        unmatched_teachers = self.client.get('/api/v1/teachers/', {'linked': 'false'})
+        self.assertEqual(unmatched_teachers.status_code, status.HTTP_200_OK)
+        unmatched_teacher_ids = {
+            t['id'] for t in unmatched_teachers.data.get('results', unmatched_teachers.data)
+        }
+        self.assertIn(self.teacher_row.id, unmatched_teacher_ids)
+        self.assertNotIn(linked_teacher.id, unmatched_teacher_ids)
+
+
+class TeacherHubOwnerTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.linked_user = User.objects.create_user(
+            username='thub_teacher', role='teacher', clerk_id='clerk_thub_teacher'
+        )
+        self.other_user = User.objects.create_user(
+            username='thub_other', role='teacher', clerk_id='clerk_thub_other'
+        )
+        self.teacher = Teacher.objects.create(name='Hub Teacher', user=self.linked_user)
+        self.other_teacher = Teacher.objects.create(name='Other Hub Teacher', user=self.other_user)
+
+    def test_linked_teacher_can_read_own_profile(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get(f'/api/v1/teachers/{self.teacher.id}/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['id'], self.teacher.id)
+
+    def test_linked_teacher_can_read_own_attendance_summary(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get(
+            f'/api/v1/teachers/{self.teacher.id}/attendance-summary/',
+            {'range': 'week'},
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['range'], 'week')
+        self.assertIn('accountability', res.data)
+        self.assertIn('personal', res.data)
+
+    def test_teacher_denied_teachers_list(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get('/api/v1/teachers/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_teacher_denied_other_teacher_hub(self):
+        self.client.force_authenticate(user=self.linked_user)
+        res = self.client.get(f'/api/v1/teachers/{self.other_teacher.id}/')
+        self.assertIn(res.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
+
