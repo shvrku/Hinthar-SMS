@@ -20,14 +20,20 @@ from people.audit import (
     AuditedViewSetMixin,
     log_event,
 )
-from people.permissions import IsAdmin, IsStaffOrAbove, IsStudentOwnerOrStaffOrAdmin
+from people.permissions import (
+    IsAdmin,
+    IsStaffOrAbove,
+    IsStudentOwnerOrStaffOrAdmin,
+    IsTeacherOwnerOrStaffOrAdmin,
+)
 from people.roles import ROLE_RANK
 from people.student_analytics import VALID_RANGES, build_student_attendance_summary
 from people.teacher_analytics import build_teacher_attendance_summary
 
 User = get_user_model()
 
-LINKABLE_USER_ROLES = frozenset({'pending', 'student'})
+STUDENT_LINKABLE_USER_ROLES = frozenset({'pending', 'student'})
+TEACHER_LINKABLE_USER_ROLES = frozenset({'pending', 'teacher'})
 
 
 def _parse_linked_param(request):
@@ -42,6 +48,13 @@ def _parse_linked_param(request):
 def _user_has_other_profile(user):
     return (
         Teacher.objects.filter(user=user).exists()
+        or Staff.objects.filter(user=user).exists()
+    )
+
+
+def _user_has_student_or_staff_profile(user):
+    return (
+        Student.objects.filter(user=user).exists()
         or Staff.objects.filter(user=user).exists()
     )
 
@@ -206,8 +219,24 @@ class TeacherViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     audit_noun_plural = 'teachers'
     audit_label_attr = 'name'
 
+    def _is_owner(self, request):
+        return (
+            request.user.is_authenticated
+            and request.user.role == 'teacher'
+        )
+
+    def get_permissions(self):
+        """Owner may retrieve their own record + attendance-summary; mutations remain staff-only."""
+        if self.action in ('retrieve', 'attendance_summary'):
+            return [IsTeacherOwnerOrStaffOrAdmin()]
+        return super().get_permissions()
+
     def get_queryset(self):
         qs = super().get_queryset()
+
+        if self._is_owner(self.request) and self.action in ('retrieve', 'attendance_summary'):
+            return qs.filter(user=self.request.user)
+
         q = (self.request.query_params.get('q') or '').strip()
         school_code = self.request.query_params.get('school_code')
         employment_type = self.request.query_params.get('employment_type')
@@ -220,6 +249,12 @@ class TeacherViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
             qs = qs.filter(school_code=school_code)
         if employment_type and employment_type != 'all':
             qs = qs.filter(employment_type=employment_type)
+
+        linked = _parse_linked_param(self.request)
+        if linked is True:
+            qs = qs.filter(user__isnull=False)
+        elif linked is False:
+            qs = qs.filter(user__isnull=True)
 
         return qs
 
@@ -250,9 +285,10 @@ class TeacherViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
         ),
     )
     @action(detail=True, methods=['get'], url_path='attendance-summary',
-            permission_classes=[IsStaffOrAbove])
+            permission_classes=[IsTeacherOwnerOrStaffOrAdmin])
     def attendance_summary(self, request, pk=None):
         teacher = self.get_object()
+        self.check_object_permissions(request, teacher)
         range_key = (request.query_params.get('range') or '').strip().lower()
         if range_key not in VALID_RANGES:
             return Response(
@@ -260,6 +296,104 @@ class TeacherViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(build_teacher_attendance_summary(teacher, range_key))
+
+    @extend_schema(
+        request=inline_serializer(
+            name='LinkTeacherUserRequest',
+            fields={'user_id': drf_serializers.IntegerField()},
+        ),
+        responses={200: TeacherSerializer},
+        summary='Link a Clerk account to this teacher',
+        description=(
+            'Admin only. Sets Teacher.user and promotes the account role to teacher. '
+            'User must be pending or teacher, with no existing student/staff profile link.'
+        ),
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def link_user(self, request, pk=None):
+        teacher = self.get_object()
+        if teacher.user_id:
+            return Response(
+                {'error': 'This teacher is already linked to an account. Unlink first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw_id = request.data.get('user_id')
+        try:
+            user_id = int(raw_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'user_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            target = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if target.role not in TEACHER_LINKABLE_USER_ROLES:
+            return Response(
+                {'error': f'Cannot link a {target.role} account to a teacher.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if _user_has_student_or_staff_profile(target):
+            return Response(
+                {'error': 'This account is already linked to a student or staff profile.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if Teacher.objects.filter(user=target).exists():
+            return Response(
+                {'error': 'This account is already linked to another teacher.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                teacher.user = target
+                teacher.save(update_fields=['user'])
+                if target.role != 'teacher':
+                    target.role = 'teacher'
+                    target.save(update_fields=['role'])
+        except IntegrityError:
+            return Response(
+                {'error': 'This account is already linked to a teacher.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.get_serializer(teacher)
+        return Response(serializer.data)
+
+    @extend_schema(
+        responses={200: TeacherSerializer},
+        summary='Unlink the account from this teacher',
+        description=(
+            'Admin only. Clears Teacher.user. If the account role is teacher, '
+            'it is set back to pending.'
+        ),
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def unlink_user(self, request, pk=None):
+        teacher = self.get_object()
+        previous = teacher.user
+        if previous is None:
+            return Response(
+                {'error': 'This teacher is not linked to an account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            teacher.user = None
+            teacher.save(update_fields=['user'])
+            if previous.role == 'teacher':
+                previous.role = 'pending'
+                previous.save(update_fields=['role'])
+
+        serializer = self.get_serializer(teacher)
+        return Response(serializer.data)
 
 
 class StudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
@@ -491,7 +625,7 @@ class StudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if target.role not in LINKABLE_USER_ROLES:
+        if target.role not in STUDENT_LINKABLE_USER_ROLES:
             return Response(
                 {'error': f'Cannot link a {target.role} account to a student.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -588,19 +722,52 @@ class UserViewSet(AuditActorMixin, BulkOperationsMixin, ModelViewSet):
         if role and role != 'all':
             qs = qs.filter(role=role)
 
+        linked_target = (self.request.query_params.get('linked_target') or 'student').strip().lower()
         linked = _parse_linked_param(self.request)
         if linked is True:
-            qs = qs.filter(student_profile__isnull=False)
+            if linked_target == 'teacher':
+                qs = qs.filter(teacher_profile__isnull=False)
+            elif linked_target == 'staff':
+                qs = qs.filter(staff_profile__isnull=False)
+            elif linked_target == 'any':
+                qs = qs.filter(
+                    Q(student_profile__isnull=False)
+                    | Q(teacher_profile__isnull=False)
+                    | Q(staff_profile__isnull=False)
+                )
+            else:
+                qs = qs.filter(student_profile__isnull=False)
         elif linked is False:
-            qs = qs.filter(student_profile__isnull=True)
+            if linked_target == 'teacher':
+                qs = qs.filter(teacher_profile__isnull=True)
+            elif linked_target == 'staff':
+                qs = qs.filter(staff_profile__isnull=True)
+            elif linked_target == 'any':
+                qs = qs.filter(
+                    student_profile__isnull=True,
+                    teacher_profile__isnull=True,
+                    staff_profile__isnull=True,
+                )
+            else:
+                qs = qs.filter(student_profile__isnull=True)
 
         linkable = (self.request.query_params.get('linkable') or '').strip().lower()
+        linkable_target = (self.request.query_params.get('linkable_target') or 'student').strip().lower()
         if linkable in ('true', '1', 'yes'):
-            qs = qs.filter(
-                role__in=LINKABLE_USER_ROLES,
-                teacher_profile__isnull=True,
-                staff_profile__isnull=True,
-            )
+            if linkable_target == 'teacher':
+                qs = qs.filter(
+                    role__in=TEACHER_LINKABLE_USER_ROLES,
+                    student_profile__isnull=True,
+                    teacher_profile__isnull=True,
+                    staff_profile__isnull=True,
+                )
+            else:
+                qs = qs.filter(
+                    role__in=STUDENT_LINKABLE_USER_ROLES,
+                    student_profile__isnull=True,
+                    teacher_profile__isnull=True,
+                    staff_profile__isnull=True,
+                )
 
         return qs
 

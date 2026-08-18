@@ -121,6 +121,20 @@ class IsStudentOwnerOrStaffOrAdmin(permissions.BasePermission):
         return False
 
 
+class IsTeacherOwnerOrStaffOrAdmin(permissions.BasePermission):
+    """Owner teacher may read their own hub; staff/admin keep full access."""
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        if is_staff_or_above(request.user):
+            return True
+        if request.user.role == 'teacher' and obj.user == request.user:
+            return True
+        return False
+
+
 class IsAdminOrReadOnlyAuthenticated(permissions.BasePermission):
     """
     Deprecated for operational data — too broad (any auth user can read).
