@@ -285,8 +285,8 @@ POST /api/v1/webhooks/clerk/
 
 | Event | Effect |
 |-------|--------|
-| `user.created` / `user.updated` | Upsert Django user by `clerk_id`. New rows are `pending`. Existing rows update email/username only. |
-| `user.deleted` / `user.banned` | `is_active=False`. Do not delete. |
+| `user.created` / `user.updated` | Upsert Django user by `clerk_id`. New rows are `pending`. Existing rows update email/username only. If `data.banned` is `true`, also set `is_active=False` (Clerk has no `user.banned` event). Unban / `banned: false` does **not** reactivate — Django deactivate stays. |
+| `user.deleted` | `is_active=False`. Do not delete. |
 
 Admin report and repair (Users management → **Clerk Sync**):
 

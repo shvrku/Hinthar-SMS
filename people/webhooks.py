@@ -20,7 +20,7 @@ from people.clerk_users import (
 logger = logging.getLogger(__name__)
 
 UPSERT_EVENTS = frozenset({'user.created', 'user.updated'})
-DEACTIVATE_EVENTS = frozenset({'user.deleted', 'user.banned'})
+DEACTIVATE_EVENTS = frozenset({'user.deleted'})
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -57,14 +57,19 @@ class ClerkWebhookView(APIView):
             if not clerk_id:
                 return Response({'error': 'Webhook user is missing id.'}, status=400)
             user, created = upsert_from_clerk(clerk_id, email=email, username=username)
+            banned = data.get('banned') is True
+            if banned:
+                deactivate_from_clerk(clerk_id)
+                user.refresh_from_db()
             logger.info(
-                'Clerk webhook %s clerk_id=%s django_id=%s created=%s',
+                'Clerk webhook %s clerk_id=%s django_id=%s created=%s banned=%s',
                 event_type,
                 clerk_id,
                 user.pk,
                 created,
+                banned,
             )
-            return Response({'ok': True, 'created': created})
+            return Response({'ok': True, 'created': created, 'deactivated': banned})
 
         if event_type in DEACTIVATE_EVENTS:
             clerk_id = data.get('id') or ''
