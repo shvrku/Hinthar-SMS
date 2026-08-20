@@ -78,6 +78,29 @@ class ClerkWebhookTests(APITestCase):
         existing.refresh_from_db()
         self.assertEqual(existing.email, 'new@example.com')
         self.assertEqual(existing.role, 'staff')
+        self.assertTrue(existing.is_active)
+
+    def test_updated_banned_deactivates(self):
+        user, _ = upsert_from_clerk('user_ban', email='b@example.com', username='banned')
+        data = _clerk_user('user_ban', email='b@example.com', username='banned')
+        data['banned'] = True
+        res = self._post({'type': 'user.updated', 'data': data})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+        self.assertTrue(User.objects.filter(pk=user.pk).exists())
+
+    def test_updated_unbanned_does_not_reactivate(self):
+        user, _ = upsert_from_clerk('user_locked', email='l@example.com', username='locked')
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+        data = _clerk_user('user_locked', email='later@example.com', username='locked')
+        data['banned'] = False
+        res = self._post({'type': 'user.updated', 'data': data})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertEqual(user.email, 'later@example.com')
+        self.assertFalse(user.is_active)
 
     def test_deleted_deactivates(self):
         user, _ = upsert_from_clerk('user_gone', email='g@example.com', username='gone')
