@@ -158,6 +158,11 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Production security headers (disabled in dev)
 if not DEBUG:
+    # Render terminates TLS and forwards plain HTTP to gunicorn. Without this,
+    # request.is_secure() is always False behind the proxy, silently disabling
+    # SECURE_SSL_REDIRECT / secure-cookie scheme checks (or causing redirect
+    # loops depending on edge normalization).
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
