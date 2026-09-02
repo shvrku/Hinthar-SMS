@@ -25,6 +25,7 @@ urlpatterns = [
         path('', include('people.urls')),
         path('', include('timetable.urls')),
         path('', include('class_sessions.urls')),
+        path('', include('communications.urls')),
         # path('', include('payroll.urls')),  # Archived — not yet a focus feature
     ])),
 ]
