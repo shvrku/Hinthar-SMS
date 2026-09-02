@@ -159,3 +159,12 @@ class IsStaffOrAdminOrReadOnlyAuthenticated(permissions.BasePermission):
         if is_staff_or_above(request.user):
             return True
         return request.method in permissions.SAFE_METHODS
+
+
+class IsStaffOrAboveOrReadOnly(permissions.BasePermission):
+    """Active authenticated users may read; staff+ may write."""
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return is_active_account(request.user)
+        return is_staff_or_above(request.user)

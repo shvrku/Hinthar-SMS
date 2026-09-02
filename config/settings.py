@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     'people.apps.PeopleConfig',
     'timetable.apps.TimetableConfig',
     'class_sessions.apps.ClassSessionsConfig',
+    'communications.apps.CommunicationsConfig',
     'payroll.apps.PayrollConfig',  # Kept for migration graph — models/endpoints are archived
 ]
 
