@@ -103,11 +103,16 @@ class EventViewSet(viewsets.ModelViewSet):
 
     def _registration_window_open(self, event):
         now = timezone.now()
+        if event.status != Event.STATUS_PUBLISHED:
+            return False
         if event.registration_opens_at and now < event.registration_opens_at:
             return False
         if event.registration_closes_at and now > event.registration_closes_at:
             return False
-        if event.status != Event.STATUS_PUBLISHED:
+        # Past events cannot accept new registrations once they have ended
+        # (or started, when no end time is set).
+        cutoff = event.ends_at or event.starts_at
+        if cutoff and now >= cutoff:
             return False
         return True
 
@@ -117,6 +122,10 @@ class EventViewSet(viewsets.ModelViewSet):
         if event.audience == Event.AUDIENCE_INTERNAL and _pending_user(user):
             return False, 'Internal events require a linked school account.'
         if not self._registration_window_open(event):
+            now = timezone.now()
+            cutoff = event.ends_at or event.starts_at
+            if cutoff and now >= cutoff:
+                return False, 'Registration is closed for this past event.'
             return False, 'Registration is not open for this event.'
         return True, None
 
