@@ -1,6 +1,6 @@
 # Hinthar SMS — School Management System
 
-API-first school management for people, classes, timetabling, sessions, attendance, and campus check-in.
+API-first school management for people, classes, timetabling, sessions, attendance, campus check-in, and school communications (announcements / events).
 
 **Payroll is archived / out of scope** for the current product cycle (`payroll/` app is unmounted).
 
@@ -38,6 +38,7 @@ All under `/api/v1/`.
 | `/adhoc-sessions/`, `/adhoc-session-attendances/`, `GET /adhoc-attendance/matrix/` | Tutoring / ad-hoc                                  |
 | `/check-ins/` (+ `qr/`, `manual/`, `overview/`)                                    | Daily campus check-in                              |
 | `GET /stats/`                                                                      | Counts, 30-day trends, enrollment series, recent activity |
+| `/announcements/`, `/events/`, `/tags/`                                            | School communications (feed, registration, staff manage) |
 
 
 ## What It Does

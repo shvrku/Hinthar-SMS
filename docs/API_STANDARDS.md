@@ -615,7 +615,35 @@ A uniform `{detail, code, fields?}` global handler is optional later hygiene —
 
 ---
 
-## 7. Payroll (scrap / freeze)
+## 7. School communications (`communications` app)
+
+Mounted under `/api/v1/` via router: `tags`, `announcements`, `events`.
+
+| Resource | Notes |
+|----------|--------|
+| `GET/POST /announcements/` | Paginated; filters `q`, `tag` (slug). Prefetch `tags`. Staff+ write. |
+| `GET/PATCH/DELETE /announcements/{slug}/` | Detail by slug. |
+| `GET/POST /events/` | Paginated; `when=upcoming\|past`, `q`, `tag`. Public list may omit internal-only rows when unauthenticated (view policy). |
+| `GET/PATCH/DELETE /events/{slug}/` | Detail; includes `registration_count` (confirmed) + `my_registration` when authed. |
+| `POST /events/{slug}/register/` | Authenticated. Rejects when registration window closed. |
+| `POST /events/{slug}/cancel-registration/` | Authenticated. |
+| `GET /events/{slug}/registrations/` | Staff+ roster. |
+| `POST /events/{slug}/registrations/{id}/review/` | Staff+ status change. |
+| `/tags/` | Scope `announcement` \| `event`. |
+
+**Registration window** (`EventViewSet._registration_window_open`):
+
+1. Before `registration_opens_at` → closed.
+2. After `registration_closes_at` → closed.
+3. Else closed when `now >= (ends_at or starts_at)` — past/ended events do not accept new registrations.
+
+**Validation:** `ends_at` must be strictly after `starts_at` when both set.
+
+Dashboard contracts: sibling repo `docs/SCHOOL_COMMUNICATIONS.md` + `isEventRegistrationOpen()`.
+
+---
+
+## 8. Payroll (scrap / freeze)
 
 - Keep `payroll/` app **unmounted** and commented.
 - Live residue removed: `Session.paid`, `AdHocSession.paid`, `Teacher.default_rate`, `Teacher.bank_details`, paid-delete guards.
@@ -624,7 +652,7 @@ A uniform `{detail, code, fields?}` global handler is optional later hygiene —
 
 ---
 
-## 8. Docs that must stay truthful
+## 9. Docs that must stay truthful
 
 When changing list pagination or route names, update in the same PR:
 
@@ -632,4 +660,4 @@ When changing list pagination or route names, update in the same PR:
 - OpenAPI descriptions on the view
 - Dashboard `lib/api.ts` client helpers
 - `docs/SCALING_IMPLEMENTATION_PLAN.md` status if phase completion changes
-- Dashboard `docs/FRONTEND_STANDARDS.md` when UX contracts change
+- Dashboard `docs/FRONTEND_STANDARDS.md` / `docs/SCHOOL_COMMUNICATIONS.md` when UX contracts change
