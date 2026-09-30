@@ -283,3 +283,62 @@ class HubTimetableAccessTests(APITestCase):
         res = self.client.get(f"/api/v1/timetable/class/{self.class_obj.id}/")
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
 
+
+class ClassCascadeDeletionTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="class_del_admin", role="admin", clerk_id="clerk_class_del_1"
+        )
+        self.class_obj = Class.objects.create(education_level="IG", cohort_identifier="Z")
+        self.teacher = Teacher.objects.create(name="Delete Test Teacher")
+        self.subject = Subject.objects.create(name="Delete Test Math")
+        self.student = Student.objects.create(name="Delete Test Student")
+        self.class_student = ClassStudent.objects.create(class_obj=self.class_obj, student=self.student)
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=1,
+            start_time="10:00",
+            end_time="11:00",
+        )
+        today = timezone.localdate()
+        self.session = Session.objects.create(
+            timetable_slot=self.slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, time(10, 0))),
+            end_time=timezone.make_aware(datetime.combine(today, time(11, 0))),
+            status="scheduled",
+        )
+        self.attendance = SessionAttendance.objects.create(
+            session=self.session, student=self.student, status="present"
+        )
+
+    def test_delete_class_deletes_everything_cleanly(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(f"/api/v1/classes/{self.class_obj.id}/")
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Class.objects.filter(id=self.class_obj.id).exists())
+        self.assertFalse(Session.objects.filter(id=self.session.id).exists())
+        self.assertFalse(SessionAttendance.objects.filter(id=self.attendance.id).exists())
+        self.assertFalse(TimetableSlot.objects.filter(id=self.slot.id).exists())
+        self.assertFalse(ClassStudent.objects.filter(id=self.class_student.id).exists())
+
+    def test_bulk_delete_classes_deletes_everything_cleanly(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(
+            "/api/v1/classes/bulk_delete/",
+            {"ids": [self.class_obj.id]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["deleted_count"], 1)
+        self.assertFalse(Class.objects.filter(id=self.class_obj.id).exists())
+        self.assertFalse(Session.objects.filter(id=self.session.id).exists())
+        self.assertFalse(SessionAttendance.objects.filter(id=self.attendance.id).exists())
+        self.assertFalse(TimetableSlot.objects.filter(id=self.slot.id).exists())
+        self.assertFalse(ClassStudent.objects.filter(id=self.class_student.id).exists())
+
+

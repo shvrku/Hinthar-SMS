@@ -32,6 +32,51 @@ class ClassViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     audit_noun = 'class'
     audit_noun_plural = 'classes'
 
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            from class_sessions.models import Session
+            # Delete all sessions associated directly or through timetable slots
+            # Deleting Session automatically cascades into SessionAttendance
+            Session.objects.filter(
+                Q(class_obj=instance) | Q(timetable_slot__class_obj=instance)
+            ).delete()
+            super().perform_destroy(instance)
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from class_sessions.models import Session
+        with transaction.atomic():
+            Session.objects.filter(
+                Q(class_obj_id__in=ids) | Q(timetable_slot__class_obj_id__in=ids)
+            ).delete()
+            qs = self.get_queryset().filter(pk__in=ids)
+            classes_count = qs.count()
+            qs.delete()
+
+        request = getattr(self, 'request', None)
+        user = getattr(request, 'user', None) if request else None
+        from people.audit import log_event
+        log_event(
+            user=user,
+            category=self.audit_category,
+            action='delete',
+            summary=f"Bulk deleted {classes_count} classes and all associated sessions/timetable records",
+            model_name='Class',
+            record_id='',
+            new_value=str(classes_count),
+        )
+        return Response(
+            {'deleted_count': classes_count, 'deleted_ids': ids},
+            status=status.HTTP_200_OK
+        )
+
     @extend_schema(
         parameters=[
             OpenApiParameter(
