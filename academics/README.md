@@ -1,18 +1,5 @@
 # Phase 1: academics for Hinthar SMS
 
-## Seed dummy students for IG K3
-
-Run `python manage.py seed_ig_k3_students` to create 30 dummy student profiles
-and enroll them in IG K3, creating the class if necessary. The command uses the
-configured Django database (`DATABASE_URL` for PostgreSQL). It creates no login
-accounts and makes no authentication service calls.
-
-Students have realistic names, teenage birth dates, reserved `example.com`
-contact addresses, school code `HIS`, dummy candidate numbers, and unique
-check-in tokens. Codes `DUMMY-IGK3-001` through `DUMMY-IGK3-030` identify this
-seed set. Repeated runs preserve existing profiles and restore any missing
-enrollments without adding duplicates. All inserts share one transaction.
-
 ## Source and verification
 
 The GitHub integration returned 404 for `HintharProject/school-management-system-api-prod`
