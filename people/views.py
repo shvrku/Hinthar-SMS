@@ -223,6 +223,39 @@ class SubjectViewSet(BulkOperationsMixin, ModelViewSet):
     ordering = ['id']
     pagination_class = None  # small catalog — used as dropdown options
 
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            from class_sessions.models import Session, AdHocSession
+            from timetable.models import TimetableSlot
+            # Delete all regular and ad-hoc sessions associated with this subject
+            Session.objects.filter(timetable_slot__subject=instance).delete()
+            AdHocSession.objects.filter(subject=instance).delete()
+            TimetableSlot.objects.filter(subject=instance).delete()
+            super().perform_destroy(instance)
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from class_sessions.models import Session, AdHocSession
+        from timetable.models import TimetableSlot
+        with transaction.atomic():
+            Session.objects.filter(timetable_slot__subject_id__in=ids).delete()
+            AdHocSession.objects.filter(subject_id__in=ids).delete()
+            TimetableSlot.objects.filter(subject_id__in=ids).delete()
+            qs = self.get_queryset().filter(pk__in=ids)
+            deleted_count, _ = qs.delete()
+
+        return Response(
+            {'deleted_count': deleted_count, 'deleted_ids': ids},
+            status=status.HTTP_200_OK
+        )
+
 
 class TeacherViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = Teacher.objects.select_related('user').order_by('id')
