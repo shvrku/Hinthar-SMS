@@ -624,11 +624,20 @@ class AttendanceMatrixView(APIView):
         sessions = capped[:MATRIX_SESSION_CAP]
         session_ids = [s.id for s in sessions]
 
-        # Enrolled students for this class ONLY
+        # Enrolled cohort students + cross-enrolled students
+        from timetable.models import StudentSubjectEnrollment
         class_students = ClassStudent.objects.select_related('student').filter(
             class_obj_id=class_id_int
         ).order_by('student__name')
-        students = [cs.student for cs in class_students]
+        cross_students = [
+            sse.student
+            for sse in StudentSubjectEnrollment.objects.select_related('student')
+            .filter(class_obj_id=class_id_int)
+        ]
+        student_map = {cs.student.id: cs.student for cs in class_students}
+        for st in cross_students:
+            student_map[st.id] = st
+        students = sorted(student_map.values(), key=lambda s: s.name.lower())
         student_ids = [st.id for st in students]
 
         attendances = list(

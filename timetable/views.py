@@ -6,9 +6,11 @@ from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResp
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
 from django.db.models import Q
-from timetable.models import Class, ClassStudent, TimetableSlot
+from timetable.models import Class, ClassStudent, StudentSubjectEnrollment, TimetableSlot
 from timetable.serializers import (
-    ClassSerializer, ClassStudentSerializer, ClassStudentListSerializer, TimetableSlotSerializer
+    ClassSerializer, ClassStudentSerializer, ClassStudentListSerializer,
+    StudentSubjectEnrollmentSerializer, StudentSubjectEnrollmentListSerializer,
+    TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
 from timetable.access import can_read_class_timetable, can_read_teacher_timetable
@@ -20,6 +22,7 @@ from people.student_analytics import VALID_RANGES
 from timetable.class_analytics import build_class_attendance_summary
 from rest_framework import status
 from rest_framework.decorators import action
+from django.utils import timezone
 
 
 class ClassViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
@@ -163,12 +166,84 @@ class ClassStudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet
         return qs
 
 
-class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
+class StudentSubjectEnrollmentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
+    queryset = StudentSubjectEnrollment.objects.select_related('class_obj', 'subject', 'student__user').order_by('id')
+    serializer_class = StudentSubjectEnrollmentSerializer
+    permission_classes = [IsStaffOrAbove]
+    ordering = ['id']
+    audit_category = 'class'
+    audit_noun = 'cross_enrollment'
+    audit_noun_plural = 'cross_enrollments'
+
+    def audit_summary(self, action, instance):
+        student = getattr(getattr(instance, 'student', None), 'name', None) or instance.student_id
+        klass = instance.class_obj
+        subj = getattr(getattr(instance, 'subject', None), 'name', None) or instance.subject_id
+        if action == 'create':
+            return f"Cross-enrolled {student} into {subj} ({klass})"
+        if action == 'delete':
+            return f"Removed {student} from {subj} ({klass})"
+        return f"Updated cross-enrollment of {student} into {subj} ({klass})"
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        # Ensure upcoming scheduled sessions for this subject in this class have attendance rows
+        from class_sessions.models import Session, SessionAttendance
+        now = timezone.now()
+        sessions = Session.objects.filter(
+            class_obj=instance.class_obj,
+            timetable_slot__subject=instance.subject,
+            start_time__gte=now,
+            status='scheduled'
+        )
+        to_create = [
+            SessionAttendance(session=s, student=instance.student, status='absent')
+            for s in sessions
+        ]
+        if to_create:
+            SessionAttendance.objects.bulk_create(to_create, ignore_conflicts=True)
+
+    def perform_destroy(self, instance):
+        from class_sessions.models import SessionAttendance
+        now = timezone.now()
+        SessionAttendance.objects.filter(
+            student=instance.student,
+            session__class_obj=instance.class_obj,
+            session__timetable_slot__subject=instance.subject,
+            session__start_time__gte=now,
+            session__status='scheduled',
+            status='absent'
+        ).delete()
+        super().perform_destroy(instance)
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return StudentSubjectEnrollmentListSerializer
+        return StudentSubjectEnrollmentSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
+        student_id = self.request.query_params.get('student_id')
+        subject_id = self.request.query_params.get('subject_id')
+        if class_id:
+            qs = qs.filter(class_obj_id=class_id)
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        if subject_id:
+            qs = qs.filter(subject_id=subject_id)
+        return qs
+
+
+class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
     queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').order_by('id')
     serializer_class = TimetableSlotSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
     pagination_class = None  # scoped by class; list requires class_id
+    audit_category = 'class'
+    audit_noun = 'timetable slot'
+    audit_noun_plural = 'timetable slots'
 
     def list(self, request, *args, **kwargs):
         class_id = request.query_params.get('class_id') or request.query_params.get('class_obj_id')
@@ -245,7 +320,7 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
             teacher=serializer.validated_data.get('teacher'),
             room=serializer.validated_data.get('room'),
         )
-        serializer.save()
+        return super().perform_create(serializer)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -260,7 +335,48 @@ class TimetableSlotViewSet(BulkOperationsMixin, ModelViewSet):
             day=day, start=start, end=end, teacher=teacher, room=room,
             exclude_pk=instance.pk,
         )
-        serializer.save()
+        return super().perform_update(serializer)
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            from class_sessions.models import Session
+            # Delete all sessions generated for this timetable slot
+            # Deleting Session automatically cascades into SessionAttendance
+            Session.objects.filter(timetable_slot=instance).delete()
+            super().perform_destroy(instance)
+
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': 'Expected a non-empty list of IDs in {"ids": [...]}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from class_sessions.models import Session
+        with transaction.atomic():
+            Session.objects.filter(timetable_slot_id__in=ids).delete()
+            qs = self.get_queryset().filter(pk__in=ids)
+            slots_count = qs.count()
+            qs.delete()
+
+        request = getattr(self, 'request', None)
+        user = getattr(request, 'user', None) if request else None
+        from people.audit import log_event
+        log_event(
+            user=user,
+            category=getattr(self, 'audit_category', 'class'),
+            action='delete',
+            summary=f"Bulk deleted {slots_count} timetable slots and all associated sessions",
+            model_name='TimetableSlot',
+            record_id='',
+            new_value=str(slots_count),
+        )
+        return Response(
+            {'deleted_count': slots_count, 'deleted_ids': ids},
+            status=status.HTTP_200_OK
+        )
 
     @extend_schema(
         summary="Create a timetable slot",
