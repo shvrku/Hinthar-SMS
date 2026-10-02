@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from timetable.models import Class, ClassStudent, TimetableSlot
+from timetable.models import Class, ClassStudent, StudentSubjectEnrollment, TimetableSlot
 from people.serializers import SubjectSerializer, TeacherSerializer, StudentSerializer
 from people.models import Student, Subject, Teacher
 
@@ -39,6 +39,37 @@ class ClassStudentListSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassStudent
         fields = ['id', 'class_obj', 'student', 'class_obj_id', 'student_id']
+        read_only_fields = fields
+
+
+class StudentSubjectEnrollmentSerializer(serializers.ModelSerializer):
+    class_obj = ClassSerializer(read_only=True)
+    student = StudentSerializer(read_only=True)
+    subject = SubjectSerializer(read_only=True)
+    class_obj_id = serializers.PrimaryKeyRelatedField(
+        source='class_obj', queryset=Class.objects.all()
+    )
+    student_id = serializers.PrimaryKeyRelatedField(
+        source='student', queryset=Student.objects.all()
+    )
+    subject_id = serializers.PrimaryKeyRelatedField(
+        source='subject', queryset=Subject.objects.all()
+    )
+
+    class Meta:
+        model = StudentSubjectEnrollment
+        fields = ['id', 'class_obj', 'student', 'subject', 'class_obj_id', 'student_id', 'subject_id']
+
+
+class StudentSubjectEnrollmentListSerializer(serializers.ModelSerializer):
+    """List payload without StudentSerializer heavy nested fields."""
+    class_obj = ClassSerializer(read_only=True)
+    student = ClassStudentListStudentSerializer(read_only=True)
+    subject = SubjectSerializer(read_only=True)
+
+    class Meta:
+        model = StudentSubjectEnrollment
+        fields = ['id', 'class_obj', 'student', 'subject', 'class_obj_id', 'student_id', 'subject_id']
         read_only_fields = fields
 
 class TimetableSlotSerializer(serializers.ModelSerializer):

@@ -4,7 +4,7 @@ import calendar
 from django.utils import timezone
 
 from class_sessions.models import Session, SessionAttendance
-from timetable.models import TimetableSlot, ClassStudent
+from timetable.models import TimetableSlot, ClassStudent, StudentSubjectEnrollment
 from people.audit import mute_audit
 
 
@@ -40,9 +40,12 @@ def generate_sessions_for_slots(slots, start_date=None, end_date=None):
             class_ids.add(slot.class_obj_id)
 
     class_students_map = {}
+    cross_students_map = {}
     if class_ids:
         for cs in ClassStudent.objects.filter(class_obj_id__in=class_ids).select_related('student'):
             class_students_map.setdefault(cs.class_obj_id, []).append(cs.student)
+        for sse in StudentSubjectEnrollment.objects.filter(class_obj_id__in=class_ids).select_related('student'):
+            cross_students_map.setdefault((sse.class_obj_id, sse.subject_id), []).append(sse.student)
 
     created_sessions = []
     existing_sessions = []
@@ -68,12 +71,14 @@ def generate_sessions_for_slots(slots, start_date=None, end_date=None):
 
                     if created:
                         created_sessions.append(session)
-                        # Auto-create attendance rows from the class roster
+                        # Auto-create attendance rows from the class roster + cross-enrolled students
                         students = class_students_map.get(slot.class_obj_id, [])
-                        if students:
+                        cross_students = cross_students_map.get((slot.class_obj_id, slot.subject_id), [])
+                        all_students = set(students) | set(cross_students)
+                        if all_students:
                             SessionAttendance.objects.bulk_create(
                                 [SessionAttendance(session=session, student=s, status='absent')
-                                 for s in students],
+                                 for s in all_students],
                                 ignore_conflicts=True,
                             )
                     else:

@@ -61,6 +61,31 @@ class ClassStudent(models.Model):
         return f"{self.student.name} in {self.class_obj}"
 
 
+class StudentSubjectEnrollment(models.Model):
+    """
+    Sidecar table: tracks students cross-enrolled into a specific subject 
+    of another class without enrolling them in the entire class cohort.
+    """
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='cross_subject_enrollments')
+    class_obj = models.ForeignKey(Class, on_delete=models.CASCADE, related_name='cross_subject_enrollments')
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='cross_student_enrollments')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'class_obj', 'subject'],
+                name='unique_student_class_subject_enrollment'
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['student', 'class_obj', 'subject'], name='idx_stud_cls_subj_rel'),
+            models.Index(fields=['class_obj', 'subject'], name='idx_cls_subj_rel'),
+        ]
+
+    def __str__(self):
+        return f"{self.student.name} -> {self.subject.name} in {self.class_obj}"
+
+
 class TimetableSlot(models.Model):
     DAY_CHOICES = [
         (0, 'Monday'),
