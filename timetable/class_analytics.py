@@ -1,25 +1,27 @@
 from datetime import date, timedelta
 
-from django.db.models import Count, F, Min
+from django.db.models import Count, F, Min, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from class_sessions.datetime_bounds import aware_day_range
 from class_sessions.models import CheckIn, SessionAttendance
 from people.student_analytics import VALID_RANGES, _bump, _empty_status, _iter_dates, _STATUS_KEYS
+from timetable.conflicts import get_enrolled_students_for_course
 
 
-def resolve_class_analytics_range(range_key: str, class_obj) -> tuple[date, date]:
-    """Return (date_from, date_to) for class attendance windows."""
+def resolve_class_analytics_range(range_key: str, class_obj, subject_id: int | None = None) -> tuple[date, date]:
+    """Return (date_from, date_to) for class/course attendance windows."""
     today = timezone.localdate()
     if range_key == 'week':
         date_from = today - timedelta(days=today.weekday())
     elif range_key == 'month':
         date_from = today.replace(day=1)
     elif range_key == 'all':
-        earliest = (
-            class_obj.sessions.aggregate(earliest=Min('start_time'))['earliest']
-        )
+        sessions_qs = class_obj.sessions.all()
+        if subject_id is not None:
+            sessions_qs = sessions_qs.filter(timetable_slot__subject_id=subject_id)
+        earliest = sessions_qs.aggregate(earliest=Min('start_time'))['earliest']
         if earliest is not None:
             date_from = timezone.localtime(earliest).date()
         else:
@@ -29,22 +31,29 @@ def resolve_class_analytics_range(range_key: str, class_obj) -> tuple[date, date
     return date_from, today
 
 
-def build_class_attendance_summary(class_obj, range_key: str):
+def build_class_attendance_summary(class_obj, range_key: str, subject_id: int | None = None):
     if range_key not in VALID_RANGES:
         raise ValueError(f'range must be one of: {", ".join(sorted(VALID_RANGES))}')
 
-    date_from, date_to = resolve_class_analytics_range(range_key, class_obj)
+    date_from, date_to = resolve_class_analytics_range(range_key, class_obj, subject_id=subject_id)
     # Keep full since-first-session daily series (range=all semantics unchanged).
     calendar_days = list(_iter_dates(date_from, date_to))
     start_dt, end_dt = aware_day_range(date_from, date_to)
 
-    enrolled_count = class_obj.class_students.count()
+    if subject_id is not None:
+        enrolled_students = get_enrolled_students_for_course(class_obj.id, subject_id=subject_id)
+        enrolled_student_ids = [s.id for s in enrolled_students]
+        enrolled_count = len(enrolled_student_ids)
+        check_in_filter = Q(student_id__in=enrolled_student_ids)
+    else:
+        enrolled_count = class_obj.class_students.count()
+        check_in_filter = Q(student__enrolled_classes__class_obj=class_obj)
 
     check_ins_by_date = {
         row['date']: row['c']
         for row in (
             CheckIn.objects.filter(
-                student__enrolled_classes__class_obj=class_obj,
+                check_in_filter,
                 date__gte=date_from,
                 date__lte=date_to,
             )
@@ -69,11 +78,14 @@ def build_class_attendance_summary(class_obj, range_key: str):
         session__start_time__gte=start_dt,
         session__start_time__lt=end_dt,
     )
+    if subject_id is not None:
+        session_base = session_base.filter(session__timetable_slot__subject_id=subject_id)
 
     status_counts = _empty_status()
     for row in session_base.values('status').annotate(c=Count('id')):
         _bump(status_counts, row['status'], row['c'])
 
+    cohort_identifier = str(class_obj)
     by_subject_map = {}
     for row in (
         session_base
@@ -81,15 +93,19 @@ def build_class_attendance_summary(class_obj, range_key: str):
             'status',
             subject_id=F('session__timetable_slot__subject_id'),
             subject_name=F('session__timetable_slot__subject__name'),
+            course_id=F('session__timetable_slot__course_id'),
         )
         .annotate(c=Count('id'))
     ):
         subject_key = row['subject_id'] or 0
+        subj_label = row['subject_name'] or 'Unknown'
         entry = by_subject_map.setdefault(
             subject_key,
             {
+                'course_id': row['course_id'],
                 'subject_id': row['subject_id'],
-                'subject_label': row['subject_name'] or 'Unknown',
+                'subject_label': subj_label,
+                'course_label': f"{cohort_identifier} — {subj_label}",
                 **_empty_status(),
                 'total': 0,
             },
@@ -155,6 +171,8 @@ def build_class_attendance_summary(class_obj, range_key: str):
         'range': range_key,
         'date_from': date_from.isoformat(),
         'date_to': date_to.isoformat(),
+        'cohort_identifier': cohort_identifier,
+        'subject_id': subject_id,
         'campus': {
             'enrolled_students': enrolled_count,
             'days_in_range': len(calendar_days),

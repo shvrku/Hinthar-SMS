@@ -6,17 +6,19 @@ from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResp
 from drf_spectacular.types import OpenApiTypes
 from django.db import transaction
 from django.db.models import Q
-from timetable.models import Class, ClassStudent, StudentSubjectEnrollment, TimetableSlot
+from timetable.models import Class, Course, ClassStudent, StudentSubjectEnrollment, TimetableSlot
 from timetable.serializers import (
-    ClassSerializer, ClassStudentSerializer, ClassStudentListSerializer,
+    ClassSerializer, CourseSerializer, ClassStudentSerializer, ClassStudentListSerializer,
     StudentSubjectEnrollmentSerializer, StudentSubjectEnrollmentListSerializer,
     TimetableSlotSerializer
 )
 from timetable.utils import generate_sessions_for_slots
 from timetable.access import can_read_class_timetable, can_read_teacher_timetable
+from timetable.conflicts import detect_student_conflicts, get_student_timetable_slots
 from people.audit import AuditedViewSetMixin, log_sessions_generated
-from people.models import Teacher
+from people.models import Student, Teacher
 from people.permissions import IsActiveAuthenticated, IsStaffOrAbove
+from people.roles import is_staff_or_above
 from people.views import BulkOperationsMixin
 from people.student_analytics import VALID_RANGES
 from timetable.class_analytics import build_class_attendance_summary
@@ -90,8 +92,15 @@ class ClassViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
                 description='Preset window: week | month | all',
                 enum=sorted(VALID_RANGES),
             ),
+            OpenApiParameter(
+                'subject_id',
+                OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Optional Subject ID to scope attendance summary to a specific Course in this Cohort.',
+            ),
         ],
-        summary='Class campus + lesson attendance summary',
+        summary='Cohort / Course campus + lesson attendance summary',
         description=(
             'Staff+. Lesson roll and campus check-in for enrolled students are separate objects. '
             'Never blend them into a single rate.'
@@ -107,7 +116,55 @@ class ClassViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
                 {'error': f'range must be one of: {", ".join(sorted(VALID_RANGES))}'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response(build_class_attendance_summary(class_obj, range_key))
+        subject_id_raw = request.query_params.get('subject_id')
+        subject_id = None
+        if subject_id_raw and subject_id_raw != 'all':
+            try:
+                subject_id = int(subject_id_raw)
+            except (TypeError, ValueError):
+                return Response({'error': 'subject_id must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(build_class_attendance_summary(class_obj, range_key, subject_id=subject_id))
+
+
+class CourseViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
+    """
+    Catalog of Courses (Cohort + Subject offerings, e.g. 'IG K1 — Mathematics').
+    """
+    queryset = Course.objects.select_related('class_obj', 'subject', 'default_teacher').order_by('id')
+    serializer_class = CourseSerializer
+    permission_classes = [IsStaffOrAbove]
+    ordering = ['id']
+    pagination_class = None
+    audit_category = 'class'
+    audit_noun = 'course'
+    audit_noun_plural = 'courses'
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        class_id = (
+            self.request.query_params.get('class_id')
+            or self.request.query_params.get('cohort_id')
+            or self.request.query_params.get('class_obj_id')
+        )
+        subject_id = self.request.query_params.get('subject_id')
+        if class_id:
+            qs = qs.filter(class_obj_id=class_id)
+        if subject_id:
+            qs = qs.filter(subject_id=subject_id)
+        return qs
+
+    @action(detail=True, methods=['get'], url_path='attendance-summary', permission_classes=[IsStaffOrAbove])
+    def attendance_summary(self, request, pk=None):
+        course = self.get_object()
+        range_key = (request.query_params.get('range') or '').strip().lower()
+        if range_key not in VALID_RANGES:
+            return Response(
+                {'error': f'range must be one of: {", ".join(sorted(VALID_RANGES))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            build_class_attendance_summary(course.class_obj, range_key, subject_id=course.subject_id)
+        )
 
 
 @extend_schema_view(
@@ -118,7 +175,7 @@ class ClassViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
                 OpenApiTypes.INT,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='Canonical class filter.',
+                description='Canonical class/cohort filter.',
             ),
             OpenApiParameter(
                 'class_obj_id',
@@ -165,55 +222,118 @@ class ClassStudentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet
             qs = qs.filter(student_id=student_id)
         return qs
 
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        student_id = response.data.get('student_id') or (response.data.get('student') or {}).get('id')
+        if student_id:
+            conflict_report = detect_student_conflicts(int(student_id))
+            response.data['has_conflicts'] = conflict_report['has_conflicts']
+            response.data['conflict_count'] = conflict_report['conflict_count']
+            response.data['conflicts'] = conflict_report['conflicts']
+        return response
+
 
 class StudentSubjectEnrollmentViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
-    queryset = StudentSubjectEnrollment.objects.select_related('class_obj', 'subject', 'student__user').order_by('id')
+    queryset = StudentSubjectEnrollment.objects.select_related('class_obj', 'subject', 'course', 'student__user').order_by('id')
     serializer_class = StudentSubjectEnrollmentSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
     audit_category = 'class'
-    audit_noun = 'cross_enrollment'
-    audit_noun_plural = 'cross_enrollments'
+    audit_noun = 'course_enrollment'
+    audit_noun_plural = 'course_enrollments'
 
     def audit_summary(self, action, instance):
         student = getattr(getattr(instance, 'student', None), 'name', None) or instance.student_id
         klass = instance.class_obj
         subj = getattr(getattr(instance, 'subject', None), 'name', None) or instance.subject_id
         if action == 'create':
-            return f"Cross-enrolled {student} into {subj} ({klass})"
+            if instance.status == 'dropped':
+                return f"Dropped {student} from {subj} ({klass})"
+            return f"Enrolled {student} into {subj} ({klass})"
         if action == 'delete':
             return f"Removed {student} from {subj} ({klass})"
-        return f"Updated cross-enrollment of {student} into {subj} ({klass})"
+        return f"Updated course enrollment of {student} in {subj} ({klass})"
+
+    def _sync_future_session_attendance(self, instance):
+        from class_sessions.models import Session, SessionAttendance
+        now = timezone.now()
+        if instance.status == 'dropped':
+            SessionAttendance.objects.filter(
+                student=instance.student,
+                session__class_obj=instance.class_obj,
+                session__timetable_slot__subject=instance.subject,
+                session__start_time__gte=now,
+                session__status='scheduled',
+                status='absent',
+            ).delete()
+        else:
+            sessions = Session.objects.filter(
+                class_obj=instance.class_obj,
+                timetable_slot__subject=instance.subject,
+                start_time__gte=now,
+                status='scheduled',
+            )
+            to_create = [
+                SessionAttendance(session=s, student=instance.student, status='absent')
+                for s in sessions
+            ]
+            if to_create:
+                SessionAttendance.objects.bulk_create(to_create, ignore_conflicts=True)
 
     def perform_create(self, serializer):
         instance = serializer.save()
-        # Ensure upcoming scheduled sessions for this subject in this class have attendance rows
-        from class_sessions.models import Session, SessionAttendance
-        now = timezone.now()
-        sessions = Session.objects.filter(
-            class_obj=instance.class_obj,
-            timetable_slot__subject=instance.subject,
-            start_time__gte=now,
-            status='scheduled'
-        )
-        to_create = [
-            SessionAttendance(session=s, student=instance.student, status='absent')
-            for s in sessions
-        ]
-        if to_create:
-            SessionAttendance.objects.bulk_create(to_create, ignore_conflicts=True)
+        self._sync_future_session_attendance(instance)
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        self._sync_future_session_attendance(instance)
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        student_id = response.data.get('student_id') or (response.data.get('student') or {}).get('id')
+        if student_id:
+            conflict_report = detect_student_conflicts(int(student_id))
+            response.data['has_conflicts'] = conflict_report['has_conflicts']
+            response.data['conflict_count'] = conflict_report['conflict_count']
+            response.data['conflicts'] = conflict_report['conflicts']
+        return response
 
     def perform_destroy(self, instance):
         from class_sessions.models import SessionAttendance
         now = timezone.now()
-        SessionAttendance.objects.filter(
-            student=instance.student,
-            session__class_obj=instance.class_obj,
-            session__timetable_slot__subject=instance.subject,
-            session__start_time__gte=now,
-            session__status='scheduled',
-            status='absent'
-        ).delete()
+        if instance.status == 'enrolled':
+            # Only remove future absent rows if student is not in this cohort as primary cohort
+            is_primary = ClassStudent.objects.filter(
+                student=instance.student, class_obj=instance.class_obj
+            ).exists()
+            if not is_primary:
+                SessionAttendance.objects.filter(
+                    student=instance.student,
+                    session__class_obj=instance.class_obj,
+                    session__timetable_slot__subject=instance.subject,
+                    session__start_time__gte=now,
+                    session__status='scheduled',
+                    status='absent',
+                ).delete()
+        elif instance.status == 'dropped':
+            # Re-enrolling back into their primary cohort's course on delete of 'dropped' override
+            is_primary = ClassStudent.objects.filter(
+                student=instance.student, class_obj=instance.class_obj
+            ).exists()
+            if is_primary:
+                from class_sessions.models import Session
+                sessions = Session.objects.filter(
+                    class_obj=instance.class_obj,
+                    timetable_slot__subject=instance.subject,
+                    start_time__gte=now,
+                    status='scheduled',
+                )
+                to_create = [
+                    SessionAttendance(session=s, student=instance.student, status='absent')
+                    for s in sessions
+                ]
+                if to_create:
+                    SessionAttendance.objects.bulk_create(to_create, ignore_conflicts=True)
         super().perform_destroy(instance)
 
     def get_serializer_class(self):
@@ -223,20 +343,30 @@ class StudentSubjectEnrollmentViewSet(AuditedViewSetMixin, BulkOperationsMixin, 
 
     def get_queryset(self):
         qs = super().get_queryset()
-        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
+        class_id = (
+            self.request.query_params.get('class_id')
+            or self.request.query_params.get('cohort_id')
+            or self.request.query_params.get('class_obj_id')
+        )
         student_id = self.request.query_params.get('student_id')
         subject_id = self.request.query_params.get('subject_id')
+        course_id = self.request.query_params.get('course_id')
+        status_param = self.request.query_params.get('status')
         if class_id:
             qs = qs.filter(class_obj_id=class_id)
         if student_id:
             qs = qs.filter(student_id=student_id)
         if subject_id:
             qs = qs.filter(subject_id=subject_id)
+        if course_id:
+            qs = qs.filter(course_id=course_id)
+        if status_param:
+            qs = qs.filter(status=status_param)
         return qs
 
 
 class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSet):
-    queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').order_by('id')
+    queryset = TimetableSlot.objects.select_related('class_obj', 'subject', 'course', 'teacher__user').order_by('id')
     serializer_class = TimetableSlotSerializer
     permission_classes = [IsStaffOrAbove]
     ordering = ['id']
@@ -246,7 +376,12 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
     audit_noun_plural = 'timetable slots'
 
     def list(self, request, *args, **kwargs):
-        class_id = request.query_params.get('class_id') or request.query_params.get('class_obj_id')
+        class_id = (
+            request.query_params.get('class_id')
+            or request.query_params.get('cohort_id')
+            or request.query_params.get('class_obj_id')
+            or request.query_params.get('course_id')
+        )
         if not class_id:
             return Response(
                 {'error': 'class_id is required'},
@@ -256,9 +391,19 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
 
     def get_queryset(self):
         qs = super().get_queryset()
-        class_id = self.request.query_params.get('class_id') or self.request.query_params.get('class_obj_id')
+        class_id = (
+            self.request.query_params.get('class_id')
+            or self.request.query_params.get('cohort_id')
+            or self.request.query_params.get('class_obj_id')
+        )
+        course_id = self.request.query_params.get('course_id')
+        subject_id = self.request.query_params.get('subject_id')
         if class_id:
             qs = qs.filter(class_obj_id=class_id)
+        if course_id:
+            qs = qs.filter(course_id=course_id)
+        if subject_id:
+            qs = qs.filter(subject_id=subject_id)
         return qs
 
     def _validate_no_overlap(self, day, start, end, teacher, room, exclude_pk=None):
@@ -325,7 +470,6 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
     @transaction.atomic
     def perform_update(self, serializer):
         instance = serializer.instance
-        # Merge submitted values with existing instance values for complete validation
         day = serializer.validated_data.get('day_of_week', instance.day_of_week)
         start = serializer.validated_data.get('start_time', instance.start_time)
         end = serializer.validated_data.get('end_time', instance.end_time)
@@ -340,8 +484,6 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
     def perform_destroy(self, instance):
         with transaction.atomic():
             from class_sessions.models import Session
-            # Delete all sessions generated for this timetable slot
-            # Deleting Session automatically cascades into SessionAttendance
             Session.objects.filter(timetable_slot=instance).delete()
             super().perform_destroy(instance)
 
@@ -387,7 +529,6 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
         }
     )
     def create(self, request, *args, **kwargs):
-        """Create a timetable slot and auto-generate sessions for the rest of the month."""
         response = super().create(request, *args, **kwargs)
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
@@ -405,7 +546,6 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
         }
     )
     def update(self, request, *args, **kwargs):
-        """Update a timetable slot and auto-generate sessions for the rest of the month."""
         response = super().update(request, *args, **kwargs)
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
@@ -423,7 +563,6 @@ class TimetableSlotViewSet(AuditedViewSetMixin, BulkOperationsMixin, ModelViewSe
         }
     )
     def partial_update(self, request, *args, **kwargs):
-        """Partial update a timetable slot and auto-generate sessions for the rest of the month."""
         response = super().partial_update(request, *args, **kwargs)
         slot = TimetableSlot.objects.get(pk=response.data['id'])
         created, existed = generate_sessions_for_slots([slot])
@@ -449,7 +588,7 @@ class TeacherTimetableView(APIView):
             raise PermissionDenied()
         if not Teacher.objects.filter(pk=teacher_id).exists():
             raise NotFound()
-        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(teacher_id=teacher_id).order_by('id')
+        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'course', 'teacher__user').filter(teacher_id=teacher_id).order_by('id')
         serializer = TimetableSlotSerializer(slots, many=True)
         return Response(serializer.data)
 
@@ -458,10 +597,10 @@ class ClassTimetableView(APIView):
     permission_classes = [IsActiveAuthenticated]
 
     @extend_schema(
-        summary="Class timetable",
+        summary="Class / Cohort timetable",
         description=(
-            "Weekly TimetableSlot rows for this class (not dated sessions). "
-            "Staff+ any class; linked student only classes they are enrolled in."
+            "Weekly TimetableSlot rows for this class/cohort (not dated sessions). "
+            "Staff+ any class; linked student only classes/courses they are enrolled in."
         ),
         responses={200: TimetableSlotSerializer(many=True)},
     )
@@ -471,6 +610,58 @@ class ClassTimetableView(APIView):
             raise PermissionDenied()
         if not Class.objects.filter(pk=class_id).exists():
             raise NotFound()
-        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'teacher__user').filter(class_obj_id=class_id).order_by('id')
+        slots = TimetableSlot.objects.select_related('class_obj', 'subject', 'course', 'teacher__user').filter(class_obj_id=class_id).order_by('id')
         serializer = TimetableSlotSerializer(slots, many=True)
         return Response(serializer.data)
+
+
+class StudentTimetableAndConflictsView(APIView):
+    """
+    Returns a student's effective weekly TimetableSlots across all enrolled Courses
+    (Primary Cohort courses minus dropped + external Cohort courses) along with
+    any non-blocking timetable conflict warnings.
+    Supports optional ?candidate_class_id=X&candidate_subject_id=Y (or ?candidate_course_id=Z)
+    to preview conflicts before enrolling.
+    """
+    permission_classes = [IsActiveAuthenticated]
+
+    def get(self, request, student_id):
+        student_id = int(student_id)
+        user = request.user
+        is_owner = (
+            getattr(user, 'role', None) == 'student'
+            and getattr(user, 'student_profile', None) is not None
+            and user.student_profile.id == student_id
+        )
+        if not (is_staff_or_above(user) or is_owner):
+            raise PermissionDenied()
+
+        if not Student.objects.filter(pk=student_id).exists():
+            raise NotFound()
+
+        candidate_pairs: set[tuple[int, int]] = set()
+        candidate_course_id = request.query_params.get('candidate_course_id')
+        candidate_class_id = request.query_params.get('candidate_class_id') or request.query_params.get('candidate_cohort_id')
+        candidate_subject_id = request.query_params.get('candidate_subject_id')
+
+        if candidate_course_id:
+            try:
+                course = Course.objects.filter(pk=int(candidate_course_id)).first()
+                if course:
+                    candidate_pairs.add((course.class_obj_id, course.subject_id))
+            except (TypeError, ValueError):
+                pass
+        if candidate_class_id and candidate_subject_id:
+            try:
+                candidate_pairs.add((int(candidate_class_id), int(candidate_subject_id)))
+            except (TypeError, ValueError):
+                pass
+
+        slots = get_student_timetable_slots(student_id, extra_pairs=candidate_pairs or None)
+        conflict_report = detect_student_conflicts(student_id, candidate_pairs=candidate_pairs or None)
+
+        return Response({
+            'student_id': student_id,
+            'slots': TimetableSlotSerializer(slots, many=True).data,
+            **conflict_report,
+        })

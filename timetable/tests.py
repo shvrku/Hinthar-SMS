@@ -433,3 +433,148 @@ class StudentSubjectEnrollmentTests(APITestCase):
         self.assertFalse(StudentSubjectEnrollment.objects.filter(id=sse.id).exists())
 
 
+
+class CohortCourseAndConflictTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="cohort_course_admin", role="admin", clerk_id="clerk_cohort_course_1"
+        )
+        # Create cohorts using the new explicit terminology fields
+        self.cohort_ig_k1 = Class.objects.create(
+            education_level="IG", cohort="K", sub_cohort_category="1"
+        )
+        self.cohort_ig_k2 = Class.objects.create(
+            education_level="IG", cohort="K", sub_cohort_category="2"
+        )
+        self.teacher_1 = Teacher.objects.create(name="Teacher One")
+        self.teacher_2 = Teacher.objects.create(name="Teacher Two")
+        self.math = Subject.objects.create(name="Course Math")
+        self.physics = Subject.objects.create(name="Course Physics")
+        self.econ = Subject.objects.create(name="Course Economics")
+        self.student = Student.objects.create(name="Course Student")
+
+        # Assign Primary Cohort IG K1
+        ClassStudent.objects.create(class_obj=self.cohort_ig_k1, student=self.student)
+
+        # IG K1 has Math (Mon 09:00-10:00) and Physics (Mon 10:00-11:00)
+        self.slot_k1_math = TimetableSlot.objects.create(
+            class_obj=self.cohort_ig_k1,
+            subject=self.math,
+            teacher=self.teacher_1,
+            day_of_week=0,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        self.slot_k1_phys = TimetableSlot.objects.create(
+            class_obj=self.cohort_ig_k1,
+            subject=self.physics,
+            teacher=self.teacher_1,
+            day_of_week=0,
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+        )
+
+        # IG K2 has Economics (Mon 09:30-10:30) -> overlaps with IG K1 Math AND IG K1 Physics!
+        self.slot_k2_econ = TimetableSlot.objects.create(
+            class_obj=self.cohort_ig_k2,
+            subject=self.econ,
+            teacher=self.teacher_2,
+            day_of_week=0,
+            start_time=time(9, 30),
+            end_time=time(10, 30),
+        )
+
+    def test_cohort_explicit_terminology_fields(self):
+        self.assertEqual(self.cohort_ig_k1.cohort, "K")
+        self.assertEqual(self.cohort_ig_k1.sub_cohort_category, "1")
+        self.assertEqual(self.cohort_ig_k1.full_cohort_identifier, "IG K1")
+
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            "/api/v1/classes/",
+            {
+                "education_level": "IAL",
+                "cohort": "K",
+                "sub_cohort_category": "2",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["cohort"], "K")
+        self.assertEqual(res.data["sub_cohort_category"], "2")
+        self.assertEqual(res.data["full_cohort_identifier"], "IAL K2")
+
+    def test_courses_auto_created_and_listable(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get(f"/api/v1/courses/?cohort_id={self.cohort_ig_k1.id}")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data), 2)
+        labels = {c["course_label"] for c in res.data}
+        self.assertEqual(labels, {"IG K1 — Course Math", "IG K1 — Course Physics"})
+
+    def test_conflict_detected_but_enrollment_allowed(self):
+        self.client.force_authenticate(user=self.admin)
+        # Preview conflict before enrolling
+        preview = self.client.get(
+            f"/api/v1/timetable/student/{self.student.id}/"
+            f"?candidate_class_id={self.cohort_ig_k2.id}&candidate_subject_id={self.econ.id}"
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertTrue(preview.data["has_conflicts"])
+        self.assertEqual(preview.data["conflict_count"], 2)
+
+        # Enroll anyway — must NOT block!
+        res = self.client.post(
+            "/api/v1/course-enrollments/",
+            {
+                "class_obj_id": self.cohort_ig_k2.id,
+                "student_id": self.student.id,
+                "subject_id": self.econ.id,
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(res.data["has_conflicts"])
+        self.assertEqual(res.data["conflict_count"], 2)
+
+        # Dropping IG K1 Physics reduces conflict count from 2 to 1
+        drop_res = self.client.post(
+            "/api/v1/course-enrollments/",
+            {
+                "class_obj_id": self.cohort_ig_k1.id,
+                "student_id": self.student.id,
+                "subject_id": self.physics.id,
+                "status": "dropped",
+            },
+            format="json",
+        )
+        self.assertEqual(drop_res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(drop_res.data["has_conflicts"])
+        self.assertEqual(drop_res.data["conflict_count"], 1)
+
+    def test_student_can_only_have_one_primary_cohort(self):
+        self.client.force_authenticate(user=self.admin)
+        # Student is already in IG K1 as Primary Cohort; attempting to add IG K2 as a second Primary Cohort must fail
+        res = self.client.post(
+            "/api/v1/class-students/",
+            {
+                "class_obj_id": self.cohort_ig_k2.id,
+                "student_id": self.student.id,
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("student_id", res.data)
+
+        # Updating their single Primary Cohort to IG K2 via PATCH works
+        cs = ClassStudent.objects.get(student=self.student)
+        patch_res = self.client.patch(
+            f"/api/v1/class-students/{cs.id}/",
+            {"class_obj_id": self.cohort_ig_k2.id},
+            format="json",
+        )
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(ClassStudent.objects.filter(student=self.student).count(), 1)
+        self.assertEqual(ClassStudent.objects.get(student=self.student).class_obj_id, self.cohort_ig_k2.id)
+
