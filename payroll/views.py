@@ -1,174 +1,80 @@
-# Payroll views archived — not yet a focus feature
+from django.db.models.deletion import ProtectedError
+from rest_framework import permissions, serializers, viewsets
 
-# from rest_framework.viewsets import ModelViewSet
-# from rest_framework.views import APIView
-# from rest_framework.response import Response
-# from rest_framework.permissions import IsAuthenticated
-# from rest_framework.exceptions import NotFound
-# from django.db import transaction
-# from django.db.models import Sum
-# from payroll.models import PayPeriod, Payslip, Adjustment
-# from payroll.serializers import (
-#     PayPeriodSerializer, PayslipSerializer, AdjustmentSerializer
-# )
-# from people.permissions import IsAdmin
-# from people.models import Teacher
-# from class_sessions.models import Session
+from .models import FeePayment, StaffSalary, StudentFee
+from .serializers import FeePaymentSerializer, StaffSalarySerializer, StudentFeeSerializer
 
-# class PayPeriodViewSet(ModelViewSet):
-#     queryset = PayPeriod.objects.all()
-#     serializer_class = PayPeriodSerializer
-#     permission_classes = [IsAuthenticated]
 
-#     def get_permissions(self):
-#         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-#             return [IsAdmin()]
-#         return [IsAuthenticated()]
+class IsFinanceAdministrator(permissions.BasePermission):
+    """Use the existing Django role, with a fallback for standard Django users."""
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated or not user.is_active:
+            return False
+        if user.is_superuser:
+            return True
+        if hasattr(user, "role"):
+            return user.role == "admin"
+        return user.is_staff
 
-# class PayslipViewSet(ModelViewSet):
-#     queryset = Payslip.objects.select_related(
-#         'teacher', 'teacher__user', 'pay_period'
-#     ).all()
-#     serializer_class = PayslipSerializer
-#     permission_classes = [IsAuthenticated]
 
-#     def get_permissions(self):
-#         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-#             return [IsAdmin()]
-#         return [IsAuthenticated()]
+class FinanceViewSet(viewsets.ModelViewSet):
+    # Inherits the project's configured authentication (including Clerk, if configured).
+    permission_classes = [IsFinanceAdministrator]
+    id_filters = {}
+    status_choices = ()
+    status_lookup = "status"
 
-# class AdjustmentViewSet(ModelViewSet):
-#     queryset = Adjustment.objects.all()
-#     serializer_class = AdjustmentSerializer
-#     permission_classes = [IsAuthenticated]
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        for parameter, field in self.id_filters.items():
+            value = self.request.query_params.get(parameter)
+            if value is not None:
+                try:
+                    value = int(value)
+                    if value <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({parameter: "Must be a positive integer."})
+                queryset = queryset.filter(**{field: value})
+        status = self.request.query_params.get("status")
+        if status is not None and self.status_choices:
+            if status not in self.status_choices:
+                raise serializers.ValidationError({"status": "Invalid status."})
+            queryset = queryset.filter(**{self.status_lookup: status})
+        return queryset
 
-#     def get_permissions(self):
-#         if self.action in ['update', 'partial_update', 'destroy']:
-#             return [IsAdmin()]
-#         return [IsAuthenticated()]
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError as exc:
+            raise serializers.ValidationError(
+                {"detail": "Cannot delete a record with related payments."}
+            ) from exc
 
-# class PayslipPreviewView(APIView):
-#     permission_classes = [IsAdmin]
 
-#     def get(self, request):
-#         teacher_id = request.query_params.get('teacher_id')
-#         pay_period_id = request.query_params.get('pay_period_id')
+class StudentFeeViewSet(FinanceViewSet):
+    serializer_class = StudentFeeSerializer
+    id_filters = {"student_id": "student_id", "academic_year_id": "academic_year_id"}
+    status_choices = StudentFee.Status.values
+    status_lookup = "_current_status"
 
-#         if not teacher_id or not pay_period_id:
-#             return Response({'error': 'teacher_id and pay_period_id are required'}, status=400)
+    def get_queryset(self):
+        # Build this per request so today's date is never frozen at import time.
+        self.queryset = StudentFee.objects.with_payment_status().select_related(
+            "student", "academic_year"
+        ).prefetch_related("payments")
+        return super().get_queryset()
 
-#         try:
-#             pay_period = PayPeriod.objects.get(id=pay_period_id)
-#             teacher = Teacher.objects.get(id=teacher_id)
-#         except PayPeriod.DoesNotExist:
-#             raise NotFound(detail='Pay period not found')
-#         except Teacher.DoesNotExist:
-#             raise NotFound(detail='Teacher not found')
 
-#         sessions = Session.objects.filter(
-#             teacher=teacher,
-#             start_time__date__range=(pay_period.start_date, pay_period.end_date),
-#             status='completed',
-#             paid=False
-#         )
-#         session_count = sessions.count()
+class FeePaymentViewSet(FinanceViewSet):
+    queryset = FeePayment.objects.select_related("student_fee").all()
+    serializer_class = FeePaymentSerializer
+    id_filters = {"student_fee_id": "student_fee_id", "student_id": "student_fee__student_id"}
 
-#         rate_applied = teacher.default_rate
 
-#         gross_pay = session_count * rate_applied
-#         tax_deduction = gross_pay * 0.15
-#         other_deductions = 0
-#         adjustments_total = Adjustment.objects.filter(
-#             teacher=teacher,
-#             status='pending',
-#             applied_payslip__isnull=True
-#         ).aggregate(total=Sum('amount'))['total'] or 0
-#         net_pay = gross_pay - tax_deduction - other_deductions + adjustments_total
-
-#         return Response({
-#             'teacher_id': teacher_id,
-#             'pay_period_id': pay_period_id,
-#             'session_count': session_count,
-#             'rate_applied': rate_applied,
-#             'gross_pay': gross_pay,
-#             'tax_deduction': tax_deduction,
-#             'other_deductions': other_deductions,
-#             'adjustments_total': adjustments_total,
-#             'net_pay': net_pay
-#         })
-
-# class ConfirmPayslipView(APIView):
-#     permission_classes = [IsAdmin]
-
-#     @transaction.atomic
-#     def post(self, request):
-#         teacher_id = request.data.get('teacher_id')
-#         pay_period_id = request.data.get('pay_period_id')
-
-#         if not teacher_id or not pay_period_id:
-#             return Response({'error': 'teacher_id and pay_period_id are required'}, status=400)
-
-#         try:
-#             pay_period = PayPeriod.objects.get(id=pay_period_id)
-#             teacher = Teacher.objects.get(id=teacher_id)
-#         except PayPeriod.DoesNotExist:
-#             raise NotFound(detail='Pay period not found')
-#         except Teacher.DoesNotExist:
-#             raise NotFound(detail='Teacher not found')
-
-#         sessions = Session.objects.select_for_update().filter(
-#             teacher=teacher,
-#             start_time__date__range=(pay_period.start_date, pay_period.end_date),
-#             status='completed',
-#             paid=False
-#         )
-#         session_count = sessions.count()
-
-#         if session_count == 0:
-#             return Response(
-#                 {'error': 'No unpaid completed sessions found for this teacher in the selected pay period.'},
-#                 status=400
-#             )
-
-#         rate_applied = teacher.default_rate
-
-#         gross_pay = session_count * rate_applied
-#         tax_deduction = gross_pay * 0.15
-#         other_deductions = 0
-
-#         adjustments = Adjustment.objects.select_for_update().filter(
-#             teacher=teacher,
-#             status='pending',
-#             applied_payslip__isnull=True
-#         )
-#         adjustments_total = sum(adj.amount for adj in adjustments)
-
-#         net_pay = gross_pay - tax_deduction - other_deductions + adjustments_total
-
-#         payslip = Payslip(
-#             teacher=teacher,
-#             pay_period=pay_period,
-#             session_count=session_count,
-#             rate_applied=rate_applied,
-#             gross_pay=gross_pay,
-#             tax_deduction=tax_deduction,
-#             other_deductions=other_deductions,
-#             adjustments_total=adjustments_total,
-#             net_pay=net_pay,
-#             status='approved'
-#         )
-#         payslip._audit_user = request.user
-#         payslip.save()
-
-#         # Mark sessions as paid and link to payslip
-#         for session in sessions:
-#             session.paid = True
-#             session.payslip = payslip
-#             session._audit_user = request.user
-#             session.save()
-
-#         # Mark adjustments as applied and link to payslip
-#         adjustments.update(status='applied', applied_payslip=payslip)
-
-#         serializer = PayslipSerializer(payslip)
-#         return Response(serializer.data)
+class StaffSalaryViewSet(FinanceViewSet):
+    queryset = StaffSalary.objects.select_related("staff").all()
+    serializer_class = StaffSalarySerializer
+    id_filters = {"staff_id": "staff_id"}
+    status_choices = StaffSalary.Status.values
