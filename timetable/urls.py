@@ -5,6 +5,7 @@ from timetable import views
 router = DefaultRouter()
 router.register(r'classes', views.ClassViewSet)
 router.register(r'class-students', views.ClassStudentViewSet)
+router.register(r'student-subject-enrollments', views.StudentSubjectEnrollmentViewSet)
 router.register(r'timetable-slots', views.TimetableSlotViewSet)
 
 urlpatterns = [

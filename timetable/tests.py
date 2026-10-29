@@ -7,7 +7,7 @@ from rest_framework.test import APITestCase, APIClient
 
 from class_sessions.models import Session, SessionAttendance
 from people.models import Student, Subject, Teacher
-from timetable.models import Class, ClassStudent, TimetableSlot
+from timetable.models import Class, ClassStudent, StudentSubjectEnrollment, TimetableSlot
 
 User = get_user_model()
 
@@ -282,4 +282,154 @@ class HubTimetableAccessTests(APITestCase):
         self.client.force_authenticate(user=self.teacher_user)
         res = self.client.get(f"/api/v1/timetable/class/{self.class_obj.id}/")
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ClassCascadeDeletionTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="class_del_admin", role="admin", clerk_id="clerk_class_del_1"
+        )
+        self.class_obj = Class.objects.create(education_level="IG", cohort_identifier="Z")
+        self.teacher = Teacher.objects.create(name="Delete Test Teacher")
+        self.subject = Subject.objects.create(name="Delete Test Math")
+        self.student = Student.objects.create(name="Delete Test Student")
+        self.class_student = ClassStudent.objects.create(class_obj=self.class_obj, student=self.student)
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_obj,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=1,
+            start_time="10:00",
+            end_time="11:00",
+        )
+        today = timezone.localdate()
+        self.session = Session.objects.create(
+            timetable_slot=self.slot,
+            teacher=self.teacher,
+            class_obj=self.class_obj,
+            start_time=timezone.make_aware(datetime.combine(today, time(10, 0))),
+            end_time=timezone.make_aware(datetime.combine(today, time(11, 0))),
+            status="scheduled",
+        )
+        self.attendance = SessionAttendance.objects.create(
+            session=self.session, student=self.student, status="present"
+        )
+
+    def test_delete_class_deletes_everything_cleanly(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(f"/api/v1/classes/{self.class_obj.id}/")
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Class.objects.filter(id=self.class_obj.id).exists())
+        self.assertFalse(Session.objects.filter(id=self.session.id).exists())
+        self.assertFalse(SessionAttendance.objects.filter(id=self.attendance.id).exists())
+        self.assertFalse(TimetableSlot.objects.filter(id=self.slot.id).exists())
+        self.assertFalse(ClassStudent.objects.filter(id=self.class_student.id).exists())
+
+    def test_bulk_delete_classes_deletes_everything_cleanly(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(
+            "/api/v1/classes/bulk_delete/",
+            {"ids": [self.class_obj.id]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["deleted_count"], 1)
+        self.assertFalse(Class.objects.filter(id=self.class_obj.id).exists())
+        self.assertFalse(Session.objects.filter(id=self.session.id).exists())
+        self.assertFalse(SessionAttendance.objects.filter(id=self.attendance.id).exists())
+        self.assertFalse(TimetableSlot.objects.filter(id=self.slot.id).exists())
+        self.assertFalse(ClassStudent.objects.filter(id=self.class_student.id).exists())
+
+    def test_delete_timetable_slot_cascades_sessions(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(f"/api/v1/timetable-slots/{self.slot.id}/")
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(TimetableSlot.objects.filter(id=self.slot.id).exists())
+        self.assertFalse(Session.objects.filter(id=self.session.id).exists())
+        self.assertFalse(SessionAttendance.objects.filter(id=self.attendance.id).exists())
+        self.assertTrue(Class.objects.filter(id=self.class_obj.id).exists())
+
+    def test_bulk_delete_timetable_slots_cascades_sessions(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.delete(
+            "/api/v1/timetable-slots/bulk_delete/",
+            {"ids": [self.slot.id]},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["deleted_count"], 1)
+        self.assertFalse(TimetableSlot.objects.filter(id=self.slot.id).exists())
+        self.assertFalse(Session.objects.filter(id=self.session.id).exists())
+        self.assertFalse(SessionAttendance.objects.filter(id=self.attendance.id).exists())
+        self.assertTrue(Class.objects.filter(id=self.class_obj.id).exists())
+
+
+class StudentSubjectEnrollmentTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="cross_admin", role="admin", clerk_id="clerk_cross_1"
+        )
+        self.class_a = Class.objects.create(education_level="Year1", cohort_identifier="A")
+        self.class_b = Class.objects.create(education_level="Year2", cohort_identifier="B")
+        self.teacher = Teacher.objects.create(name="Cross Teacher")
+        self.subject = Subject.objects.create(name="Cross Physics")
+        self.student = Student.objects.create(name="Cross Student")
+        # Student primarily enrolled in Class A
+        ClassStudent.objects.create(class_obj=self.class_a, student=self.student)
+
+        # Class B has a timetable slot for Physics
+        self.slot = TimetableSlot.objects.create(
+            class_obj=self.class_b,
+            subject=self.subject,
+            teacher=self.teacher,
+            day_of_week=0,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+
+    def test_cross_enroll_creates_record(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            "/api/v1/student-subject-enrollments/",
+            {
+                "class_obj_id": self.class_b.id,
+                "student_id": self.student.id,
+                "subject_id": self.subject.id,
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            StudentSubjectEnrollment.objects.filter(
+                class_obj=self.class_b,
+                student=self.student,
+                subject=self.subject,
+            ).exists()
+        )
+
+    def test_cross_enroll_list_filter(self):
+        self.client.force_authenticate(user=self.admin)
+        StudentSubjectEnrollment.objects.create(
+            class_obj=self.class_b,
+            student=self.student,
+            subject=self.subject,
+        )
+        res = self.client.get(f"/api/v1/student-subject-enrollments/?student_id={self.student.id}")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.data.get("results", res.data)
+        self.assertEqual(len(results), 1)
+
+    def test_cross_enroll_delete(self):
+        self.client.force_authenticate(user=self.admin)
+        sse = StudentSubjectEnrollment.objects.create(
+            class_obj=self.class_b,
+            student=self.student,
+            subject=self.subject,
+        )
+        res = self.client.delete(f"/api/v1/student-subject-enrollments/{sse.id}/")
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(StudentSubjectEnrollment.objects.filter(id=sse.id).exists())
+
 
