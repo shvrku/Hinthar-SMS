@@ -83,6 +83,7 @@ def build_student_attendance_summary(student, range_key: str):
     trend_map = {}
     by_class_map = {}
     by_subject_map = {}
+    by_course_map = {}
 
     session_base = SessionAttendance.objects.filter(
         student=student,
@@ -101,19 +102,23 @@ def build_student_attendance_summary(student, range_key: str):
             education_level=F('session__class_obj__education_level'),
             cohort_identifier=F('session__class_obj__cohort_identifier'),
             cohort_sub_category=F('session__class_obj__cohort_sub_category'),
+            subject_id=F('session__timetable_slot__subject_id'),
+            subject_name=F('session__timetable_slot__subject__name'),
+            course_id=F('session__timetable_slot__course_id'),
         )
         .annotate(c=Count('id'))
     ):
         class_key = row['class_id']
+        cohort_label = _class_label(
+            row['education_level'],
+            row['cohort_identifier'],
+            row['cohort_sub_category'],
+        )
         entry = by_class_map.setdefault(
             class_key,
             {
                 'class_id': class_key,
-                'class_label': _class_label(
-                    row['education_level'],
-                    row['cohort_identifier'],
-                    row['cohort_sub_category'],
-                ),
+                'class_label': cohort_label,
                 **_empty_status(),
                 'total': 0,
             },
@@ -121,27 +126,36 @@ def build_student_attendance_summary(student, range_key: str):
         _bump(entry, row['status'], row['c'])
         entry['total'] += row['c']
 
-    for row in (
-        session_base
-        .values(
-            'status',
-            subject_id=F('session__timetable_slot__subject_id'),
-            subject_name=F('session__timetable_slot__subject__name'),
-        )
-        .annotate(c=Count('id'))
-    ):
         subject_key = row['subject_id'] or 0
-        entry = by_subject_map.setdefault(
+        subj_label = row['subject_name'] or 'Unknown'
+        subj_entry = by_subject_map.setdefault(
             subject_key,
             {
                 'subject_id': row['subject_id'],
-                'subject_label': row['subject_name'] or 'Unknown',
+                'subject_label': subj_label,
                 **_empty_status(),
                 'total': 0,
             },
         )
-        _bump(entry, row['status'], row['c'])
-        entry['total'] += row['c']
+        _bump(subj_entry, row['status'], row['c'])
+        subj_entry['total'] += row['c']
+
+        course_key = (class_key, subject_key)
+        course_entry = by_course_map.setdefault(
+            course_key,
+            {
+                'course_id': row['course_id'],
+                'class_id': class_key,
+                'cohort_identifier': cohort_label,
+                'subject_id': row['subject_id'],
+                'subject_label': subj_label,
+                'course_label': f"{cohort_label} — {subj_label}",
+                **_empty_status(),
+                'total': 0,
+            },
+        )
+        _bump(course_entry, row['status'], row['c'])
+        course_entry['total'] += row['c']
 
     for row in (
         session_base
@@ -232,6 +246,7 @@ def build_student_attendance_summary(student, range_key: str):
             ],
             'by_class': sorted(by_class_map.values(), key=lambda x: x['class_label']),
             'by_subject': sorted(by_subject_map.values(), key=lambda x: x['subject_label']),
+            'by_course': sorted(by_course_map.values(), key=lambda x: x['course_label']),
             'trend': lesson_trend,
         },
     }

@@ -41,11 +41,16 @@ def generate_sessions_for_slots(slots, start_date=None, end_date=None):
 
     class_students_map = {}
     cross_students_map = {}
+    dropped_student_ids_map = {}
     if class_ids:
         for cs in ClassStudent.objects.filter(class_obj_id__in=class_ids).select_related('student'):
             class_students_map.setdefault(cs.class_obj_id, []).append(cs.student)
         for sse in StudentSubjectEnrollment.objects.filter(class_obj_id__in=class_ids).select_related('student'):
-            cross_students_map.setdefault((sse.class_obj_id, sse.subject_id), []).append(sse.student)
+            key = (sse.class_obj_id, sse.subject_id)
+            if sse.status == 'dropped':
+                dropped_student_ids_map.setdefault(key, set()).add(sse.student_id)
+            else:
+                cross_students_map.setdefault(key, []).append(sse.student)
 
     created_sessions = []
     existing_sessions = []
@@ -71,9 +76,15 @@ def generate_sessions_for_slots(slots, start_date=None, end_date=None):
 
                     if created:
                         created_sessions.append(session)
-                        # Auto-create attendance rows from the class roster + cross-enrolled students
-                        students = class_students_map.get(slot.class_obj_id, [])
-                        cross_students = cross_students_map.get((slot.class_obj_id, slot.subject_id), [])
+                        # Auto-create attendance rows from the course roster
+                        # (Primary cohort students minus dropped + explicitly enrolled course students)
+                        key = (slot.class_obj_id, slot.subject_id)
+                        dropped_ids = dropped_student_ids_map.get(key, set())
+                        students = [
+                            s for s in class_students_map.get(slot.class_obj_id, [])
+                            if s.id not in dropped_ids
+                        ]
+                        cross_students = cross_students_map.get(key, [])
                         all_students = set(students) | set(cross_students)
                         if all_students:
                             SessionAttendance.objects.bulk_create(

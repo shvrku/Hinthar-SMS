@@ -1,5 +1,5 @@
 from people.roles import is_active_account, is_staff_or_above
-from timetable.models import ClassStudent
+from timetable.models import ClassStudent, StudentSubjectEnrollment
 
 
 def can_read_teacher_timetable(user, teacher_id: int) -> bool:
@@ -15,7 +15,7 @@ def can_read_teacher_timetable(user, teacher_id: int) -> bool:
 
 
 def can_read_class_timetable(user, class_id: int) -> bool:
-    """Staff+ any class; linked student only classes they are enrolled in."""
+    """Staff+ any class; linked student only classes/courses they are enrolled in."""
     if not is_active_account(user):
         return False
     if is_staff_or_above(user):
@@ -25,4 +25,8 @@ def can_read_class_timetable(user, class_id: int) -> bool:
     profile = getattr(user, "student_profile", None)
     if profile is None:
         return False
-    return ClassStudent.objects.filter(student_id=profile.id, class_obj_id=class_id).exists()
+    if ClassStudent.objects.filter(student_id=profile.id, class_obj_id=class_id).exists():
+        return True
+    return StudentSubjectEnrollment.objects.filter(
+        student_id=profile.id, class_obj_id=class_id, status='enrolled'
+    ).exists()
